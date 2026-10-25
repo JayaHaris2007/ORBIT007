@@ -154,7 +154,12 @@ Type `exit` or `quit` to stop interactive mode. The
 default Kokoro voice is `af_heart`; all available local voices are the `.pt`
 files in `Models/voice/voices/`.
 
-## React UI
+## Unified React UI
+
+The single frontend in `frontend/` is the S.P.I.D.E.Y workspace: a
+productivity dashboard and a personal assistant in one panel. It includes
+habits, analytics, tasks, local chat, reminders, notifications, memories,
+streaks, XP, and achievements.
 
 Install the frontend dependencies and start the Vite development server in a
 second terminal while the FastAPI server is running:
@@ -167,11 +172,16 @@ npm run dev
 
 Open `http://localhost:5173` in a browser.
 
-The frontend now connects directly to FastAPI by default at
-`http://127.0.0.1:8000`, so it does not depend on Vite's proxy for API
-requests. To use another backend address, start Vite with
-`VITE_API_URL=http://your-backend:8000 npm run dev`. FastAPI allows the local
-development origins and exposes both `/health` and `/api/health`.
+The frontend connects directly to FastAPI by default at
+`http://127.0.0.1:8000`. To use another backend address, create
+`frontend/.env.local` with:
+
+```text
+VITE_SPIDEY_API_BASE_URL=http://your-backend:8000
+```
+
+FastAPI allows the local development origins and exposes both `/health` and
+`/api/health`.
 
 Without `--reload`, after changing backend routes or reminder behavior, restart
 the FastAPI process:
@@ -205,7 +215,7 @@ is used. Do not treat every conversation message as a personal memory.
 The dashboard also exposes the SQLite-backed task and reminder APIs. These
 records are persistent, but reminder execution is not yet an always-on worker;
 the FastAPI process must remain running for delivery. Reminders created from chat
-are attached to that conversation and appear as new JARVIS messages when they
+are attached to that conversation and appear as new S.P.I.D.E.Y messages when they
 fire. For example:
 
 ```text
@@ -213,7 +223,7 @@ Remind me to study Java at 7 PM
 Remind me to review goals at 8 AM, every day
 Remind me to stretch at 6 PM, every 2 hours
 Set a reminder in 1 minute for to start the learning course
-Hey JARVIS, remind me tomorrow morning to water my plants
+Hey Spidey, remind me tomorrow morning to water my plants
 ```
 
 When a reminder uses a day part without a clock time, the scheduler uses
@@ -221,7 +231,7 @@ When a reminder uses a day part without a clock time, the scheduler uses
 9:00 PM for night.
 
 The frontend polls the notification endpoint every five seconds. When a
-reminder fires, the local LLM writes a short, natural JARVIS notification using
+reminder fires, the local LLM writes a short, natural S.P.I.D.E.Y notification using
 the reminder text and the current system date/time. If LLM generation fails,
 the reminder still appears with a direct fallback notification. If the FastAPI
 process or computer is stopped, delivery waits until a future worker is added.
@@ -233,12 +243,18 @@ Create task Finish the Python project priority high
 Show my pending tasks
 Complete task 1
 Remind me in 10 minutes to take a break
+Check my habits to complete
+What habits do I need to complete today?
 ```
 
-Completing a task marks it as completed but does not delete it immediately.
-Completed tasks remain visible in the dashboard with a check mark through the
-completion day (Asia/Kolkata time), then are automatically deleted after
-midnight. Uncompleted tasks are never removed by this cleanup.
+Completing a task from the dashboard or the S.P.I.D.E.Y assistant marks it complete.
+Completed tasks remain available in the task history and completed filter until
+you delete them.
+
+Habits are different: they are persistent protocols. Creating or editing a
+habit changes the protocol itself, while completing it records the selected
+date in `habit_completions`; the same habit can therefore be completed again
+on the next day without creating a duplicate habit.
 
 Additional API routes:
 
@@ -256,6 +272,12 @@ GET    /api/tasks?include_completed=1
 POST   /api/tasks             {"title":"Study Java","priority":"high"}
 PATCH  /api/tasks/<task_id>   {"completed":true}
 DELETE /api/tasks/<task_id>
+GET    /api/habits
+POST   /api/habits             {"name":"Read","icon":"BookOpen","daily_goal":1}
+PATCH  /api/habits/<habit_id>  {"name":"Read daily","icon":"BookOpen","daily_goal":1}
+DELETE /api/habits/<habit_id>
+PUT    /api/habits/<habit_id>/completions/<YYYY-MM-DD> {"completed":true}
+GET    /api/gamification
 GET    /api/reminders
 POST   /api/reminders         {"text":"Study Java","run_at":"2026-10-24T13:30:00Z","chat_id":"..."}
 DELETE /api/reminders/<id>
@@ -276,22 +298,42 @@ the local FastAPI API or send prompts to a cloud provider.
 
 1. Create a Discord application and bot in the Discord Developer Portal.
 2. Enable the **Message Content Intent** for the bot.
-3. Invite it to your server with only the permissions needed to read and send
-   messages.
-4. Install dependencies and set the backend-only token:
+3. Invite it to your server with only the permissions it needs: **View
+   Channels**, **Send Messages**, **Send Messages in Threads**, and **Read
+   Message History** (`permissions=274877975552`). No administrator access is
+   required.
+4. Install dependencies, copy the environment template, and paste the bot
+   token into it:
 
 ```powershell
 python -m pip install -r requirements.txt
-$env:AI_DISCORD_TOKEN = "paste-the-token-in-this-terminal-only"
-$env:AI_DISCORD_ALLOWED_USER_IDS = "your-discord-user-id"
+Copy-Item .env.example .env
+notepad .env
+```
+
+`.env` holds `AI_DISCORD_APPLICATION_ID`, `AI_DISCORD_PUBLIC_KEY`, and
+`AI_DISCORD_TOKEN`; [app.py](app.py) loads it on startup, so both the API and
+the bot see the same values. The token is the only required value, and it must
+stay out of source control and all frontend variables. Then start the bot:
+
+```powershell
 python discord_bot.py
 ```
 
-Use `!ask <message>` or mention the bot. Restricting
-`AI_DISCORD_ALLOWED_USER_IDS` is strongly recommended. You can also set
-`AI_DISCORD_ALLOWED_GUILD_IDS` to limit the bot to selected servers. Keep the
-token out of source control, `.env` files shared with others, and all frontend
-environment variables. Copy `.env.example` for the supported variable names.
+Keep exactly one bot process running. A second copy that shares the token — for
+example one from an IDE console and one from a terminal — competes for the same
+gateway session and causes missed replies. The bot also refuses to start when
+its local lock port is already taken.
+
+Reminders created in Discord are delivered to you as DMs. The bot hosts the
+reminder scheduler for Discord chats, and a reminder that was missed by up to
+30 minutes is delivered when the bot starts again.
+
+Use `!ask <message>`, mention the bot, or send any other `!command` such as
+`!status` or `!add task ...`; unregistered commands are passed to the same
+assistant pipeline as the web chat. Restricting `AI_DISCORD_ALLOWED_USER_IDS`
+is strongly recommended, since an empty allowlist lets anyone use the bot. You
+can also set `AI_DISCORD_ALLOWED_GUILD_IDS` to limit it to selected servers.
 
 ## Notes
 

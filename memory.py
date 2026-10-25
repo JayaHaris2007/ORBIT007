@@ -17,6 +17,8 @@ from zoneinfo import ZoneInfo
 MAX_CONTEXT_TOKENS = 1800
 MAX_MEMORY_TEXT = 500
 MAX_RETRIEVED_MEMORIES = 5
+HABIT_COMPLETION_XP = 10
+LOCAL_TIMEZONE = ZoneInfo("Asia/Kolkata")
 
 
 def _now() -> str:
@@ -85,6 +87,7 @@ class MemoryStore:
                 CREATE TABLE IF NOT EXISTS tasks (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     title TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
                     priority TEXT NOT NULL DEFAULT 'medium'
                         CHECK(priority IN ('low', 'medium', 'high')),
                     due_at TEXT,
@@ -106,6 +109,30 @@ class MemoryStore:
                 );
                 CREATE INDEX IF NOT EXISTS reminders_active_idx
                     ON reminders(active, run_at);
+                CREATE TABLE IF NOT EXISTS habits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    icon TEXT NOT NULL DEFAULT 'Activity',
+                    daily_goal INTEGER NOT NULL DEFAULT 1 CHECK(daily_goal > 0),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS habit_completions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    habit_id INTEGER NOT NULL REFERENCES habits(id) ON DELETE CASCADE,
+                    completion_date TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(habit_id, completion_date)
+                );
+                CREATE INDEX IF NOT EXISTS habit_completions_date_idx
+                    ON habit_completions(completion_date, habit_id);
+                CREATE TABLE IF NOT EXISTS gamification (
+                    id INTEGER PRIMARY KEY CHECK(id = 1),
+                    xp INTEGER NOT NULL DEFAULT 0 CHECK(xp >= 0),
+                    valid_streak_dates TEXT NOT NULL DEFAULT '[]',
+                    achievements TEXT NOT NULL DEFAULT '[]',
+                    updated_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS notifications (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     chat_id TEXT NOT NULL REFERENCES conversations(id)
@@ -146,6 +173,15 @@ class MemoryStore:
                     "UPDATE tasks SET completed_at = updated_at "
                     "WHERE completed = 1"
                 )
+            if "description" not in task_columns:
+                connection.execute(
+                    "ALTER TABLE tasks ADD COLUMN description TEXT NOT NULL DEFAULT ''"
+                )
+            connection.execute(
+                "INSERT OR IGNORE INTO gamification "
+                "(id, updated_at) VALUES (1, ?)",
+                (_now(),),
+            )
 
     def create_chat(self, title: str = "New conversation") -> dict[str, Any]:
         chat_id = str(uuid.uuid4())
@@ -245,15 +281,27 @@ class MemoryStore:
             )
         return chat
 
-    def list_tasks(self, include_completed: bool = False) -> list[dict[str, Any]]:
-        today = datetime.now(ZoneInfo("Asia/Kolkata")).date().isoformat()
+    def get_external_session(self, chat_id: str) -> dict[str, Any] | None:
         with self.connect() as connection:
-            connection.execute(
-                "DELETE FROM tasks WHERE completed = 1 "
-                "AND completed_at IS NOT NULL "
-                "AND substr(completed_at, 1, 10) < ?",
-                (today,),
-            )
+            row = connection.execute(
+                "SELECT provider, external_user_id FROM external_sessions "
+                "WHERE conversation_id = ?",
+                (chat_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_external_chats(self, provider: str) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT c.id, s.external_user_id "
+                "FROM external_sessions AS s "
+                "JOIN conversations AS c ON c.id = s.conversation_id "
+                "WHERE s.provider = ?",
+                (provider,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_tasks(self, include_completed: bool = False) -> list[dict[str, Any]]:
         query = "SELECT * FROM tasks"
         if not include_completed:
             query += " WHERE completed = 0"
@@ -266,19 +314,26 @@ class MemoryStore:
         return [dict(row) for row in rows]
 
     def create_task(
-        self, title: str, priority: str = "medium", due_at: str | None = None
+        self,
+        title: str,
+        priority: str = "medium",
+        due_at: str | None = None,
+        description: str = "",
     ) -> dict[str, Any]:
         title = title.strip()
+        description = description.strip()
         if not title or len(title) > 500:
             raise ValueError("Task title must contain 1-500 characters.")
+        if len(description) > 2000:
+            raise ValueError("Task description must be 2000 characters or fewer.")
         if priority not in {"low", "medium", "high"}:
             raise ValueError("Priority must be low, medium, or high.")
         now = _now()
         with self.connect() as connection:
             cursor = connection.execute(
-                "INSERT INTO tasks(title, priority, due_at, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (title, priority, due_at, now, now),
+                "INSERT INTO tasks(title, description, priority, due_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (title, description, priority, due_at, now, now),
             )
             row = connection.execute(
                 "SELECT * FROM tasks WHERE id = ?", (cursor.lastrowid,)
@@ -292,6 +347,8 @@ class MemoryStore:
         priority: str | None = None,
         due_at: str | None = None,
         completed: bool | None = None,
+        description: str | None = None,
+        clear_due_at: bool = False,
     ) -> dict[str, Any] | None:
         with self.connect() as connection:
             existing = connection.execute(
@@ -299,10 +356,17 @@ class MemoryStore:
             ).fetchone()
             if existing is None:
                 return None
+            if clear_due_at:
+                due_value = None
+            elif due_at is not None:
+                due_value = due_at
+            else:
+                due_value = existing["due_at"]
             values = (
                 title.strip() if title is not None else existing["title"],
+                description.strip() if description is not None else existing["description"],
                 priority if priority is not None else existing["priority"],
-                due_at if due_at is not None else existing["due_at"],
+                due_value,
                 int(completed) if completed is not None else existing["completed"],
                 (
                     datetime.now(timezone.utc).isoformat()
@@ -316,10 +380,12 @@ class MemoryStore:
             )
             if not values[0] or len(values[0]) > 500:
                 raise ValueError("Task title must contain 1-500 characters.")
-            if values[1] not in {"low", "medium", "high"}:
+            if len(values[1]) > 2000:
+                raise ValueError("Task description must be 2000 characters or fewer.")
+            if values[2] not in {"low", "medium", "high"}:
                 raise ValueError("Priority must be low, medium, or high.")
             connection.execute(
-                "UPDATE tasks SET title = ?, priority = ?, due_at = ?, "
+                "UPDATE tasks SET title = ?, description = ?, priority = ?, due_at = ?, "
                 "completed = ?, completed_at = ?, updated_at = ? WHERE id = ?",
                 values,
             )
@@ -332,6 +398,173 @@ class MemoryStore:
         with self.connect() as connection:
             result = connection.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         return result.rowcount > 0
+
+    @staticmethod
+    def _calculate_streak(completed_dates: list[str]) -> int:
+        completed = set(completed_dates)
+        today = datetime.now(LOCAL_TIMEZONE).date()
+        if today.isoformat() not in completed:
+            today -= timedelta(days=1)
+            if today.isoformat() not in completed:
+                return 0
+        streak = 0
+        while today.isoformat() in completed:
+            streak += 1
+            today -= timedelta(days=1)
+        return streak
+
+    def _get_gamification(self, connection: sqlite3.Connection) -> dict[str, Any]:
+        row = connection.execute(
+            "SELECT xp, valid_streak_dates, achievements FROM gamification WHERE id = 1"
+        ).fetchone()
+        if row is None:
+            now = _now()
+            connection.execute(
+                "INSERT INTO gamification(id, updated_at) VALUES (1, ?)", (now,)
+            )
+            return {"xp": 0, "valid_streak_dates": [], "achievements": []}
+        return {
+            "xp": row["xp"],
+            "valid_streak_dates": json.loads(row["valid_streak_dates"]),
+            "achievements": json.loads(row["achievements"]),
+        }
+
+    def _refresh_gamification(self, connection: sqlite3.Connection, xp_delta: int = 0) -> None:
+        data = self._get_gamification(connection)
+        habits = connection.execute("SELECT id FROM habits").fetchall()
+        valid_dates: list[str] = []
+        if habits:
+            rows = connection.execute(
+                "SELECT completion_date, COUNT(*) AS completed FROM habit_completions "
+                "GROUP BY completion_date"
+            ).fetchall()
+            threshold = len(habits) * 0.7
+            valid_dates = [row["completion_date"] for row in rows if row["completed"] >= threshold]
+        achievements = set(data["achievements"])
+        if habits:
+            achievements.add("first-habit")
+        if self._calculate_streak(valid_dates) >= 7:
+            achievements.add("seven-day-streak")
+        xp = max(0, data["xp"] + xp_delta)
+        if xp >= 100:
+            achievements.add("hundred-xp")
+        connection.execute(
+            "UPDATE gamification SET xp = ?, valid_streak_dates = ?, achievements = ?, updated_at = ? "
+            "WHERE id = 1",
+            (xp, json.dumps(sorted(valid_dates)), json.dumps(sorted(achievements)), _now()),
+        )
+
+    def list_habits(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            habits = connection.execute("SELECT * FROM habits ORDER BY id").fetchall()
+            result = []
+            for habit in habits:
+                dates = [
+                    row["completion_date"]
+                    for row in connection.execute(
+                        "SELECT completion_date FROM habit_completions "
+                        "WHERE habit_id = ? ORDER BY completion_date",
+                        (habit["id"],),
+                    )
+                ]
+                item = dict(habit)
+                item["completed_dates"] = dates
+                item["streak"] = self._calculate_streak(dates)
+                result.append(item)
+        return result
+
+    def create_habit(self, name: str, icon: str = "Activity", daily_goal: int = 1) -> dict[str, Any]:
+        name = name.strip()
+        if not name or len(name) > 200:
+            raise ValueError("Habit name must contain 1-200 characters.")
+        if not isinstance(daily_goal, int) or isinstance(daily_goal, bool) or daily_goal < 1:
+            raise ValueError("daily_goal must be a positive integer.")
+        now = _now()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "INSERT INTO habits(name, icon, daily_goal, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (name, icon.strip() or "Activity", daily_goal, now, now),
+            )
+            self._refresh_gamification(connection)
+        return next(habit for habit in self.list_habits() if habit["id"] == cursor.lastrowid)
+
+    def delete_habit(self, habit_id: int) -> bool:
+        with self.connect() as connection:
+            result = connection.execute("DELETE FROM habits WHERE id = ?", (habit_id,))
+            if result.rowcount:
+                self._refresh_gamification(connection)
+        return result.rowcount > 0
+
+    def update_habit(
+        self,
+        habit_id: int,
+        name: str | None = None,
+        icon: str | None = None,
+        daily_goal: int | None = None,
+    ) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM habits WHERE id = ?", (habit_id,)
+            ).fetchone()
+            if existing is None:
+                return None
+            next_name = name.strip() if name is not None else existing["name"]
+            next_icon = icon.strip() if icon is not None else existing["icon"]
+            next_goal = daily_goal if daily_goal is not None else existing["daily_goal"]
+            if not next_name or len(next_name) > 200:
+                raise ValueError("Habit name must contain 1-200 characters.")
+            if not next_icon:
+                raise ValueError("Habit icon cannot be empty.")
+            if (
+                not isinstance(next_goal, int)
+                or isinstance(next_goal, bool)
+                or next_goal < 1
+            ):
+                raise ValueError("daily_goal must be a positive integer.")
+            connection.execute(
+                "UPDATE habits SET name = ?, icon = ?, daily_goal = ?, updated_at = ? "
+                "WHERE id = ?",
+                (next_name, next_icon, next_goal, _now(), habit_id),
+            )
+        return next(habit for habit in self.list_habits() if habit["id"] == habit_id)
+
+    def set_habit_completion(self, habit_id: int, completion_date: str, completed: bool) -> dict[str, Any] | None:
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", completion_date):
+            raise ValueError("completion_date must use YYYY-MM-DD format.")
+        with self.connect() as connection:
+            if connection.execute("SELECT 1 FROM habits WHERE id = ?", (habit_id,)).fetchone() is None:
+                return None
+            existing = connection.execute(
+                "SELECT 1 FROM habit_completions WHERE habit_id = ? AND completion_date = ?",
+                (habit_id, completion_date),
+            ).fetchone()
+            xp_delta = 0
+            if completed and existing is None:
+                connection.execute(
+                    "INSERT INTO habit_completions(habit_id, completion_date, created_at) VALUES (?, ?, ?)",
+                    (habit_id, completion_date, _now()),
+                )
+                xp_delta = HABIT_COMPLETION_XP
+            elif not completed and existing is not None:
+                connection.execute(
+                    "DELETE FROM habit_completions WHERE habit_id = ? AND completion_date = ?",
+                    (habit_id, completion_date),
+                )
+                xp_delta = -HABIT_COMPLETION_XP
+            connection.execute("UPDATE habits SET updated_at = ? WHERE id = ?", (_now(), habit_id))
+            self._refresh_gamification(connection, xp_delta)
+        return next(habit for habit in self.list_habits() if habit["id"] == habit_id)
+
+    def get_gamification(self) -> dict[str, Any]:
+        with self.connect() as connection:
+            self._refresh_gamification(connection)
+            data = self._get_gamification(connection)
+        return {
+            "xp": data["xp"],
+            "global_streak": self._calculate_streak(data["valid_streak_dates"]),
+            "valid_streak_dates": data["valid_streak_dates"],
+            "achievements": data["achievements"],
+        }
 
     def list_reminders(self, active_only: bool = True) -> list[dict[str, Any]]:
         query = "SELECT * FROM reminders"
@@ -396,6 +629,15 @@ class MemoryStore:
                 (chat_id, after_id),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def latest_notification_id(self, chat_id: str) -> int:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT COALESCE(MAX(id), 0) AS latest FROM notifications "
+                "WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchone()
+        return int(row["latest"])
 
     def has_recent_coach_notification(
         self, chat_id: str, minutes: int = 30
