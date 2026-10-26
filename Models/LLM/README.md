@@ -1,13 +1,13 @@
 ---
 library_name: transformers
 license: apache-2.0
-license_link: https://huggingface.co/Qwen/Qwen3-1.7B/blob/main/LICENSE
+license_link: https://huggingface.co/Qwen/Qwen3-4B/blob/main/LICENSE
 pipeline_tag: text-generation
 base_model:
-- Qwen/Qwen3-1.7B-Base
+- Qwen/Qwen3-4B-Base
 ---
 
-# Qwen3-1.7B
+# Qwen3-4B
 <a href="https://chat.qwen.ai/" target="_blank" style="margin: 2px;">
     <img alt="Chat" src="https://img.shields.io/badge/%F0%9F%92%9C%EF%B8%8F%20Qwen%20Chat%20-536af5" style="display: inline-block; vertical-align: middle;"/>
 </a>
@@ -24,14 +24,14 @@ Qwen3 is the latest generation of large language models in Qwen series, offering
 
 ## Model Overview
 
-**Qwen3-1.7B** has the following features:
+**Qwen3-4B** has the following features:
 - Type: Causal Language Models
 - Training Stage: Pretraining & Post-training
-- Number of Parameters: 1.7B
-- Number of Paramaters (Non-Embedding): 1.4B
-- Number of Layers: 28
-- Number of Attention Heads (GQA): 16 for Q and 8 for KV
-- Context Length: 32,768
+- Number of Parameters: 4.0B
+- Number of Paramaters (Non-Embedding): 3.6B
+- Number of Layers: 36
+- Number of Attention Heads (GQA): 32 for Q and 8 for KV
+- Context Length: 32,768 natively and [131,072 tokens with YaRN](#processing-long-texts). 
 
 For more details, including benchmark evaluation, hardware requirements, and inference performance, please refer to our [blog](https://qwenlm.github.io/blog/qwen3/), [GitHub](https://github.com/QwenLM/Qwen3), and [Documentation](https://qwen.readthedocs.io/en/latest/).
 
@@ -51,7 +51,7 @@ The following contains a code snippet illustrating how to use the model generate
 ```python
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-model_name = "Qwen/Qwen3-1.7B"
+model_name = "Qwen/Qwen3-4B"
 
 # load the tokenizer and the model
 tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -98,11 +98,11 @@ print("content:", content)
 For deployment, you can use `sglang>=0.4.6.post1` or `vllm>=0.8.5` or to create an OpenAI-compatible API endpoint:
 - SGLang:
     ```shell
-    python -m sglang.launch_server --model-path Qwen/Qwen3-1.7B --reasoning-parser qwen3
+    python -m sglang.launch_server --model-path Qwen/Qwen3-4B --reasoning-parser qwen3
     ```
 - vLLM:
     ```shell
-    vllm serve Qwen/Qwen3-1.7B --enable-reasoning --reasoning-parser deepseek_r1
+    vllm serve Qwen/Qwen3-4B --enable-reasoning --reasoning-parser deepseek_r1
     ```
 
 For local use, applications such as Ollama, LMStudio, MLX-LM, llama.cpp, and KTransformers have also supported Qwen3.
@@ -160,7 +160,7 @@ Here is an example of a multi-turn conversation:
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 class QwenChatbot:
-    def __init__(self, model_name="Qwen/Qwen3-1.7B"):
+    def __init__(self, model_name="Qwen/Qwen3-4B"):
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         self.model = AutoModelForCausalLM.from_pretrained(model_name)
         self.history = []
@@ -223,7 +223,7 @@ from qwen_agent.agents import Assistant
 
 # Define LLM
 llm_cfg = {
-    'model': 'Qwen3-1.7B',
+    'model': 'Qwen3-4B',
 
     # Use the endpoint provided by Alibaba Model Studio:
     # 'model_type': 'qwen_dashscope',
@@ -266,6 +266,61 @@ for responses in bot.run(messages=messages):
     pass
 print(responses)
 ```
+
+## Processing Long Texts
+
+Qwen3 natively supports context lengths of up to 32,768 tokens. For conversations where the total length (including both input and output) significantly exceeds this limit, we recommend using RoPE scaling techniques to handle long texts effectively. We have validated the model's performance on context lengths of up to 131,072 tokens using the [YaRN](https://arxiv.org/abs/2309.00071) method.
+
+YaRN is currently supported by several inference frameworks, e.g., `transformers` and `llama.cpp` for local use, `vllm` and `sglang` for deployment. In general, there are two approaches to enabling YaRN for supported frameworks:
+
+- Modifying the model files:
+  In the `config.json` file, add the `rope_scaling` fields:
+    ```json
+    {
+        ...,
+        "rope_scaling": {
+            "rope_type": "yarn",
+            "factor": 4.0,
+            "original_max_position_embeddings": 32768
+        }
+    }
+    ```
+  For `llama.cpp`, you need to regenerate the GGUF file after the modification.
+
+- Passing command line arguments:
+
+  For `vllm`, you can use
+    ```shell
+    vllm serve ... --rope-scaling '{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}' --max-model-len 131072  
+    ```
+
+  For `sglang`, you can use
+    ```shell
+    python -m sglang.launch_server ... --json-model-override-args '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768}}'
+    ```
+
+  For `llama-server` from `llama.cpp`, you can use
+    ```shell
+    llama-server ... --rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 32768
+    ```
+
+> [!IMPORTANT]
+> If you encounter the following warning
+> ```
+> Unrecognized keys in `rope_scaling` for 'rope_type'='yarn': {'original_max_position_embeddings'}
+> ```
+> please upgrade `transformers>=4.51.0`.
+
+> [!NOTE]
+> All the notable open-source frameworks implement static YaRN, which means the scaling factor remains constant regardless of input length, **potentially impacting performance on shorter texts.**
+> We advise adding the `rope_scaling` configuration only when processing long contexts is required. 
+> It is also recommended to modify the `factor` as needed. For example, if the typical context length for your application is 65,536 tokens, it would be better to set `factor` as 2.0. 
+
+> [!NOTE]
+> The default `max_position_embeddings` in `config.json` is set to 40,960. This allocation includes reserving 32,768 tokens for outputs and 8,192 tokens for typical prompts, which is sufficient for most scenarios involving short text processing. If the average context length does not exceed 32,768 tokens, we do not recommend enabling YaRN in this scenario, as it may potentially degrade model performance.
+
+> [!TIP]
+> The endpoint provided by Alibaba Model Studio supports dynamic YaRN by default and no extra configuration is needed.
 
 ## Best Practices
 

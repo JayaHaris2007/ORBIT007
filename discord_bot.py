@@ -242,7 +242,7 @@ class SpideyBot(commands.Bot):
                 response = await asyncio.to_thread(
                     app.generate_response,
                     prompt,
-                    app.MAX_NEW_TOKENS,
+                    app._token_budget(prompt),
                     context,
                     memories,
                 )

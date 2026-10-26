@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import { format } from 'date-fns';
 import { Bot, Check, History, MessageSquarePlus, PanelRightClose, Send, Trash2, X } from 'lucide-react';
@@ -28,6 +29,8 @@ const formatWhen = (value) => {
 
 const AssistantSidebar = () => {
     const { revision, refresh } = useAppData();
+    const navigate = useNavigate();
+    const location = useLocation();
     // The panel is docked on wide screens; the toggle only matters below xl.
     const [open, setOpen] = useState(false);
     const [online, setOnline] = useState(false);
@@ -44,6 +47,25 @@ const AssistantSidebar = () => {
     const conversationEndRef = useRef(null);
     const activeChatRef = useRef('');
     const requestSeq = useRef(0);
+
+    // Map a page key from the backend to a real app route; unknown pages do nothing.
+    const goToPage = useCallback((page) => {
+        if (!page) return;
+        if (page === 'chat') {
+            setOpen(true);
+            return;
+        }
+        const routes = {
+            dashboard: '/dashboard',
+            habits: '/habits',
+            tasks: '/todos',
+            reminders: '/reminders',
+            memories: '/reminders',
+            settings: '/settings',
+        };
+        const route = routes[page];
+        if (route && location.pathname !== route) navigate(route);
+    }, [navigate, location.pathname]);
 
     // Load one conversation and make it the active one.
     const openChat = useCallback(async (id) => {
@@ -207,11 +229,12 @@ const AssistantSidebar = () => {
         try {
             const data = await apiRequest('/api/generate', {
                 method: 'POST',
-                body: JSON.stringify({ prompt: value, max_new_tokens: 512, chat_id: chatId })
+                body: JSON.stringify({ prompt: value, chat_id: chatId })
             });
             // Ignore a late reply if another conversation was opened meanwhile.
             if (activeChatRef.current !== chatId) return;
             setMessages(data.messages || []);
+            if (data.navigate) goToPage(data.navigate);
             refreshChats();
             // The assistant may have created or completed tasks, habits, reminders or memories.
             refresh();

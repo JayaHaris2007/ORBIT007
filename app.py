@@ -160,24 +160,71 @@ def print_device_diagnostics() -> None:
 generation_lock = threading.Lock()
 memory_store = MemoryStore(DATABASE_PATH)
 reminder_scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
+
 DEFAULT_SYSTEM_PROMPT = (
-    "You are S.P.I.D.E.Y, the user's thoughtful everyday assistant. Talk like a "
-    "warm, attentive person: use natural contractions and plain language, "
-    "keep routine replies concise, and respond to what the user actually said. "
-    "Avoid canned praise, stiff scripts, and narrating simple actions. Use the "
-    "conversation to understand short follow-ups. Local habit, task, and "
-    "reminder details shown in the conversation are available to you; never "
-    "claim you cannot access details that were just shown. If the next action "
-    "is unclear, ask one focused question. Never invent personal facts or say "
-    "you completed an action unless the application confirms it. Saved notes "
-    "cover either the user or you: when a note is about the user, speak about "
-    "them as 'you' and never restate their facts as your own history, tastes, "
-    "or plans. Web search runs in the app, not inside your reply: if the user "
-    "wants live web results, tell them to send 'web search <topic>'. Never "
-    "claim or imply that you searched, are searching, or that a search failed. "
-    "Don't repeat "
-    "instructions the user has already received. Answer in "
-    "English unless the user asks for another language."
+    "You are S.P.I.D.E.Y., Jaya's personal AI assistant, technical co-pilot, "
+    "and everyday companion. Talk naturally like a smart, friendly, attentive "
+    "person. Be confident, practical, curious, and occasionally witty. Use "
+    "natural contractions, simple English, and a conversational tone. "
+    "Never sound robotic or overly formal. "
+
+    "Keep routine replies concise, but explain technical topics in depth when "
+    "Jaya asks. Avoid canned praise, unnecessary introductions, repetitive "
+    "conclusions, and narrating simple actions. Respond directly to what "
+    "Jaya actually says and understand short follow-ups using conversation "
+    "context. "
+
+    "Jaya is a Computer Science student, developer, and technology enthusiast "
+    "who enjoys building real-world projects, exploring AI, and experimenting "
+    "with new technologies. Adapt explanations to his technical knowledge. "
+    "Help with programming, debugging, web development, databases, AI models, "
+    "system architecture, and software engineering. Prefer practical solutions, "
+    "working code, and clear explanations over unnecessary theory. "
+
+    "Act as a development partner, not just a chatbot. Help plan, build, "
+    "debug, optimize, and improve projects. Respect the existing tech stack "
+    "and architecture unless a change is genuinely beneficial. Explain "
+    "important trade-offs and recommend the best approach when appropriate. "
+    "Never claim code was tested or executed unless it actually was. "
+
+    "Help manage tasks, todos, habits, reminders, schedules, learning goals, "
+    "research, and everyday activities using available application tools. "
+    "Use conversation context and connected data whenever available. Local "
+    "habit, task, and reminder details shown in the conversation are available "
+    "to you; never ask for information that was already provided. Ask one "
+    "focused question if essential information is missing. Never claim an "
+    "action succeeded unless the application confirms it. "
+
+    "Support Jaya's learning and growth as a developer. Explain difficult "
+    "concepts clearly, connect new ideas to existing knowledge, correct "
+    "mistakes respectfully, and suggest useful next steps when appropriate. "
+    "Be encouraging without giving empty praise. Challenge ideas constructively "
+    "when doing so helps achieve a better result. "
+
+    "Use saved notes and conversation history to understand the user, "
+    "preferences, and ongoing projects. Saved notes may describe either Jaya "
+    "or you. When a note describes Jaya, speak about him as 'you' and never "
+    "present his experiences, preferences, or plans as your own. Never invent "
+    "personal facts, memories, or previous decisions. Use personal context "
+    "only when it is relevant. "
+
+    "Provide accurate, useful, and honest answers. Distinguish facts from "
+    "assumptions and acknowledge uncertainty. Web search runs through the "
+    "application, not inside your reply. If Jaya wants live web results, tell "
+    "him to send 'web search <topic>'. Never claim or imply that you searched, "
+    "are searching, or that a search failed unless the application provides "
+    "actual search results. "
+
+    "Be action-oriented, resourceful, reliable, and technically capable. "
+    "Don't overcomplicate simple requests or repeat instructions already "
+    "received. Use light humor naturally without forcing it. Think through "
+    "problems carefully, but communicate clearly and directly. "
+
+    "Your identity is S.P.I.D.E.Y. You are Jaya's dependable personal assistant, "
+    "technical co-pilot, and companion in learning and development. Help him "
+    "think clearly, build better projects, solve problems, and get things done. "
+
+    "Answer in English unless Jaya requests another language."
 )
 
 
@@ -788,10 +835,27 @@ def _parse_task_reopen(prompt: str) -> str | None:
     return (match.group(1) or match.group(2)).strip()
 
 
+_ADVICE_PATTERN = re.compile(
+    r"\b(?:what\s+(?:new|else|other|should|can|could|would)|"
+    r"should\s+i|how\s+(?:can|do|should|could|to)|"
+    r"suggest\w*|recommend\w*|advice|tips?|ideas?|improv\w+|better|"
+    r"think\s+about|opinion|why|help\s+me|ways?\s+to|"
+    r"good\s+habits?|bad\s+habits?)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_advice_question(normalized_prompt: str) -> bool:
+    """Open-ended questions belong to the LLM, not the list handlers."""
+    return bool(_ADVICE_PATTERN.search(normalized_prompt))
+
+
 def _is_task_list_request(prompt: str) -> bool:
     normalized_prompt = _normalize_command(prompt).lower()
     # Habit and reminder queries belong to their own handlers.
     if re.search(r"\b(?:habits?|reminders?)\b", normalized_prompt):
+        return False
+    if _is_advice_question(normalized_prompt):
         return False
     if re.match(
         r"^(?:add|create|new|complete|completed|finish|finished|mark|"
@@ -830,6 +894,8 @@ def _is_habit_list_request(prompt: str) -> bool:
     normalized_prompt = _normalize_command(prompt).lower()
 
     if not re.search(r"\bhabits?\b", normalized_prompt):
+        return False
+    if _is_advice_question(normalized_prompt):
         return False
     # Let explicit create/complete/update commands reach their own handlers.
     if re.match(
@@ -1047,6 +1113,8 @@ def _find_reminder(reference: str) -> dict[str, Any]:
 def _is_reminder_list_request(prompt: str) -> bool:
     normalized = _normalize_command(prompt).lower()
     if not re.search(r"\breminders?\b", normalized):
+        return False
+    if _is_advice_question(normalized):
         return False
     if re.match(
         r"^(?:cancel|delete|remove|stop|forget|set|create|add|remind|"
@@ -1576,8 +1644,57 @@ def _assistant_intro_answer(prompt: str) -> str | None:
     )
 
 
+_PAGE_BY_PROVIDER = {
+    "local-habit-manager": "habits",
+    "local-task-manager": "tasks",
+    "local-scheduler": "reminders",
+}
+
+_PAGE_ALIASES = {
+    "tasks": ("task", "tasks", "todo", "todos", "to-do", "to-dos", "to do", "to dos"),
+    "habits": ("habit", "habits"),
+    "reminders": ("reminder", "reminders"),
+    "dashboard": ("dashboard", "home", "overview"),
+    "chat": ("chat", "assistant"),
+    "research": ("research", "web research"),
+    "memories": ("memory", "memories", "notes"),
+    "learning": ("learning", "learning tracker", "roadmap", "roadmaps"),
+    "settings": ("settings",),
+}
+
+_NAVIGATE_PATTERN = re.compile(
+    r"^(?:(?:go|move|switch|navigate|jump|head)\s+(?:over\s+)?(?:to|into)"
+    r"|goto|take\s+me\s+(?:to|into)|open|bring\s+up)"
+    r"\s+(?:the\s+|my\s+)?(?P<target>[a-z\- ]+?)"
+    r"(?:\s+(?:page|section|tab|screen|view|area))?$",
+    re.IGNORECASE,
+)
+
+
+def _parse_navigation(prompt: str) -> str | None:
+    """Return a page key for 'go to tasks' style commands, else None."""
+    match = _NAVIGATE_PATTERN.match(_normalize_command(prompt))
+    if not match:
+        return None
+    target = re.sub(r"\s+", " ", match.group("target").strip().lower())
+    for page, words in _PAGE_ALIASES.items():
+        if target in words:
+            return page
+    return None
+
+
+def _page_for_provider(provider: str) -> str | None:
+    if provider.startswith("local-navigate:"):
+        return provider.split(":", 1)[1]
+    return _PAGE_BY_PROVIDER.get(provider)
+
+
 def _handle_local_command(prompt: str, chat_id: str) -> tuple[str, str] | None:
     """Answer tasks, habits, reminders, greetings, and identity locally."""
+    page = _parse_navigation(prompt)
+    if page:
+        return (f"Opening {page}.", f"local-navigate:{page}")
+
     profile = _profile_answer(prompt)
     if profile is not None:
         return (profile, "local-profile")
@@ -1764,6 +1881,22 @@ def _handle_local_command(prompt: str, chat_id: str) -> tuple[str, str] | None:
             "local-habit-manager",
         )
 
+    if _is_habit_list_request(prompt) and re.search(
+        r"\b(?:have|having|all|my habits)\b", _normalize_command(prompt).lower()
+    ) and not re.search(
+        r"\b(?:pending|left|remaining|incomplete)\b", prompt.lower()
+    ):
+        habits = memory_store.list_habits()
+        if not habits:
+            return ("You don't have any habits set up yet.", "local-habit-manager")
+        today = datetime.now(LOCAL_TIMEZONE).date().isoformat()
+        rows = "\n".join(
+            f"- **{h['name']}** — streak {h['streak']}"
+            f"{' ✅' if today in h['completed_dates'] else ''}"
+            for h in habits
+        )
+        return (f"Here are your habits:\n{rows}", "local-habit-manager")
+
     if _is_habit_list_request(prompt):
         today = datetime.now(LOCAL_TIMEZONE).date().isoformat()
         all_habits = memory_store.list_habits()
@@ -1890,6 +2023,42 @@ def resolve_short_follow_up(
     return prompt
 
 
+def _productivity_context(prompt: str) -> str:
+    """Current habits/tasks, injected only when the question is about them."""
+    if not re.search(
+        r"\b(?:habits?|tasks?|to[\s-]?dos?|routine|schedule|productiv\w*|"
+        r"improve\w*|discipline|goals?)\b",
+        prompt,
+        re.IGNORECASE,
+    ):
+        return ""
+    today = datetime.now(LOCAL_TIMEZONE).date().isoformat()
+    lines = []
+    habits = memory_store.list_habits()
+    if habits:
+        lines.append("Current habits:")
+        for habit in habits:
+            done = "done today" if today in habit["completed_dates"] else "not done today"
+            lines.append(f"- {habit['name']} (streak {habit['streak']}, {done})")
+    else:
+        lines.append("Current habits: none yet.")
+    tasks = memory_store.list_tasks(include_completed=False)
+    if tasks:
+        lines.append("Pending tasks:")
+        lines.extend(f"- {t['title']} ({t['priority']})" for t in tasks[:8])
+    return "\n".join(lines)
+
+
+def _trim_incomplete(text: str) -> str:
+    """Cut a reply back to its last finished sentence or line."""
+    ends = list(re.finditer(r"[.!?](?=\s|$)|\n", text))
+    if ends and ends[-1].end() >= len(text) * 0.4:
+        text = text[: ends[-1].end()]
+    if text.count("**") % 2:
+        text = text.rsplit("**", 1)[0]
+    return text.rstrip()
+
+
 def generate_response(
     prompt: str,
     max_new_tokens: int,
@@ -1918,6 +2087,19 @@ def generate_response(
                 "them as background about the user and address them as 'you'. "
                 "Lines about you describe you. Use them whenever they are "
                 f"relevant and never contradict them:\n{memory_text}"
+            )
+        words = int(max_new_tokens * 0.6)
+        system_prompt += (
+            f"\nKeep this reply under about {words} words and finish your "
+            "last sentence. Answer in plain conversational sentences: no "
+            "headings, no emoji, no bullet lists unless the user asks for a list."
+        )
+        extra = _productivity_context(prompt)
+        if extra:
+            system_prompt += (
+                "\nThe user's live habit and task data (use it to answer; "
+                "for advice questions, give 3-5 specific suggestions and do "
+                "not just list pending items):\n" + extra
             )
         model_context = select_generation_context(context, prompt)
         model_messages = [{"role": "system", "content": system_prompt}, *model_context]
@@ -1950,8 +2132,7 @@ def generate_response(
                 **inputs,
                 max_new_tokens=max_new_tokens,
                 do_sample=False,
-                repetition_penalty=1.15,
-                no_repeat_ngram_size=3,
+                repetition_penalty=1.05,
             )
         if cuda_available:
             torch.cuda.synchronize()
@@ -1960,6 +2141,8 @@ def generate_response(
         response = tokenizer.decode(
             outputs[0][input_len:], skip_special_tokens=True
         ).strip()
+        if generated_tokens >= max_new_tokens:
+            response = _trim_incomplete(response)
         print(
             f"[input {process_seconds:.2f}s | generation {generation_seconds:.2f}s | "
             f"{generated_tokens} tokens | "
@@ -2041,6 +2224,38 @@ def api_health():
     return health()
 
 
+TOKENS_DEFAULT = 64
+TOKENS_BRIEF = 100
+TOKENS_MEDIUM = 200
+TOKENS_LONG = 300
+
+
+def _token_budget(prompt: str) -> int:
+    """Pick a reply length from what the user is asking for."""
+    text = prompt.lower()
+    if re.search(
+        r"\b(?:brief|briefly|in short|short answer|one line|one sentence|"
+        r"quick|tl;?dr|yes or no|in a word)\b",
+        text,
+    ):
+        return TOKENS_BRIEF
+    if re.search(
+        r"\b(?:longer|long answer|more detail|in detail|detailed|elaborate|"
+        r"expand|step by step|full guide|deep dive|essay|code|script|"
+        r"function|implement|program|debug|write (?:a|an|the))\b",
+        text,
+    ):
+        return TOKENS_LONG
+    if re.search(
+        r"\b(?:explain|how (?:does|do|to|can)|compare|difference|why|"
+        r"suggest\w*|recommend\w*|ideas?|tips?|advice|improve\w*|"
+        r"pros and cons|list \d+|\d+ (?:habits|ideas|tips|ways))\b",
+        text,
+    ):
+        return TOKENS_MEDIUM
+    return TOKENS_DEFAULT
+
+
 @app.post("/generate")
 @app.post("/api/generate")
 async def generate(payload: dict[str, Any] = Body(...)):
@@ -2049,13 +2264,15 @@ async def generate(payload: dict[str, Any] = Body(...)):
         raise HTTPException(400, "Request body must be a JSON object.")
 
     prompt = payload.get("prompt")
-    max_new_tokens = payload.get("max_new_tokens", MAX_NEW_TOKENS)
+    max_new_tokens = payload.get("max_new_tokens")
     if not isinstance(prompt, str):
         raise HTTPException(400, "'prompt' must be a string.")
     if not prompt.strip():
         raise HTTPException(400, "Prompt cannot be empty.")
     if len(prompt) > MAX_PROMPT_CHARS:
         raise HTTPException(400, f"Prompt is limited to {MAX_PROMPT_CHARS} characters.")
+    if max_new_tokens is None:
+        max_new_tokens = _token_budget(prompt)
     if (
         isinstance(max_new_tokens, bool)
         or not isinstance(max_new_tokens, int)
@@ -2081,6 +2298,7 @@ async def generate(payload: dict[str, Any] = Body(...)):
 
     try:
         command = _handle_local_command(prompt, chat_id)
+        print(f"[route] {'local:' + command[1] if command else 'llm'} <- {prompt!r}")
         if command is not None:
             response, provider = command
             memory_store.add_message(chat_id, "user", prompt.strip())
@@ -2089,7 +2307,8 @@ async def generate(payload: dict[str, Any] = Body(...)):
                 "response": response,
                 "chat_id": chat_id,
                 "messages": memory_store.get_messages(chat_id),
-                "provider": provider,
+                "provider": provider.split(":", 1)[0],
+                "navigate": _page_for_provider(provider),
             }
         memory_store.add_message(chat_id, "user", prompt.strip())
         context = memory_store.build_context(chat_id, tokenizer, prompt)
@@ -2110,6 +2329,7 @@ async def generate(payload: dict[str, Any] = Body(...)):
             "chat_id": chat_id,
             "messages": memory_store.get_messages(chat_id),
             "provider": "local-qwen",
+            "navigate": None,
         }
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
@@ -2424,7 +2644,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--max-new-tokens",
         type=int,
-        default=MAX_NEW_TOKENS,
+        default=None,
         help=f"Maximum response tokens (1-{MAX_NEW_TOKENS}).",
     )
     return parser.parse_args()
@@ -2442,13 +2662,19 @@ def main() -> None:
         )
         return
 
-    if not 1 <= args.max_new_tokens <= MAX_NEW_TOKENS:
+    if (
+        args.max_new_tokens is not None
+        and not 1 <= args.max_new_tokens <= MAX_NEW_TOKENS
+    ):
         raise ValueError(
             f"--max-new-tokens must be between 1 and {MAX_NEW_TOKENS}."
         )
 
     if args.prompt is not None:
-        print(generate_response(args.prompt, args.max_new_tokens))
+        tokens = args.max_new_tokens
+        if tokens is None:
+            tokens = _token_budget(args.prompt)
+        print(generate_response(args.prompt, tokens))
         return
 
     print("Local AI assistant. Type 'exit' or 'quit' to stop.")
@@ -2461,7 +2687,10 @@ def main() -> None:
         if prompt.lower() in {"exit", "quit"}:
             return
         try:
-            print(f"AI: {generate_response(prompt, args.max_new_tokens)}")
+            tokens = args.max_new_tokens
+            if tokens is None:
+                tokens = _token_budget(prompt)
+            print(f"AI: {generate_response(prompt, tokens)}")
         except ValueError as error:
             print(f"Error: {error}")
 
