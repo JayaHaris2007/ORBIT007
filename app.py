@@ -47,6 +47,12 @@ from learning import nudges as learning_nudges
 from learning import progress as learning_progress
 from learning.router import router as learning_router
 from research.router import router as research_router
+from voice.router import (
+    router as voice_router,
+    ws_router as voice_ws_router,
+    set_chat_handler as set_voice_chat_handler,
+)
+from voice.config import purge_voice_tmp
 from research.search_engine import (
     SearchFailed,
     SearchNotConfigured,
@@ -2520,6 +2526,7 @@ def generate_response(
     max_new_tokens: int,
     messages: list[dict[str, str]] | None = None,
     memories: list[dict[str, Any]] | None = None,
+    on_token: Any | None = None,
 ) -> str:
     ensure_model_loaded()
     if not prompt.strip():
@@ -2620,6 +2627,7 @@ async def lifespan(_: FastAPI):
     # Learning tracker tables and starter roadmaps are additive and idempotent.
     # Never let a learning-module problem prevent the assistant from booting.
     init_learning_module("local")
+    purge_voice_tmp()
     try:
         yield
     finally:
@@ -2665,6 +2673,17 @@ async def handle_http_error(request: Request, error: HTTPException):
 app.include_router(research_router)
 # Adaptive learning tracker: tables, seeds, and its API surface.
 app.include_router(learning_router)
+
+# Voice subsystem
+async def _voice_chat_turn(prompt: str, chat_id: str | None = None):
+    payload = {"prompt": prompt}
+    if chat_id:
+        payload["chat_id"] = chat_id
+    return await generate(payload)
+
+set_voice_chat_handler(_voice_chat_turn)
+app.include_router(voice_router)
+app.include_router(voice_ws_router)
 
 
 @app.get("/health")
