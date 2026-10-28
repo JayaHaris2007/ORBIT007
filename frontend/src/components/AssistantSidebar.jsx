@@ -335,6 +335,7 @@ const AssistantSidebar = () => {
                             speakEnabled={voice.speakEnabled}
                             engineReady={voice.engineReady}
                             onToggle={voice.toggleSpeak}
+                            error={voice.error}
                         />
                         <button
                             type="button"

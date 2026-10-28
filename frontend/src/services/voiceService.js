@@ -115,3 +115,4 @@ export const splitSentencesClient = (text, minChars = 25, maxChars = 220) => {
     }
     return final.filter(Boolean);
 };
+

@@ -1,8 +1,8 @@
 import React from 'react';
 import { Volume2, VolumeX, AlertCircle } from 'lucide-react';
 
-export default function SpeakToggle({ speakEnabled, engineReady, onToggle, disabled = false }) {
-    const isUnavailable = !engineReady;
+export default function SpeakToggle({ speakEnabled, engineReady, onToggle, disabled = false, error = null }) {
+    const isUnavailable = !engineReady && Boolean(error);
 
     return (
         <div className="relative inline-flex items-center">
@@ -53,3 +53,4 @@ export default function SpeakToggle({ speakEnabled, engineReady, onToggle, disab
         </div>
     );
 }
+

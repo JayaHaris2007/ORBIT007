@@ -44,3 +44,4 @@ def split_sentences(text: str, min_chars: int = 25, max_chars: int = 220) -> lis
             final.append(s)
 
     return [s for s in final if s]
+

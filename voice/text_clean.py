@@ -99,3 +99,4 @@ def clean_text_for_speech(text: str) -> str:
     text = re.sub(r"([,.!?;:]){2,}", r"\1", text)
 
     return text.strip()
+

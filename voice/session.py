@@ -75,3 +75,4 @@ def reset_all_sessions() -> None:
     with _SESSIONS_LOCK:
         for session in _SESSIONS.values():
             session.reset()
+

@@ -86,21 +86,31 @@ class STT:
         audio = sr.AudioData(bytes(pcm16k), 16000, 2)  # 16 kHz, 16-bit
         recognizer = sr.Recognizer()
 
-        if self.engine in {"whisper_local", "whisper"}:
-            return recognizer.recognize_whisper(
-                audio, model=self.model, language=self.language
-            ).strip()
+        try:
+            if self.engine in {"whisper_local", "whisper"}:
+                try:
+                    import whisper
+                    return recognizer.recognize_whisper(
+                        audio, model=self.model, language=self.language
+                    ).strip()
+                except (ImportError, ModuleNotFoundError):
+                    log.info("Local whisper package not installed; falling back to SpeechRecognition Google recognizer.")
+                    return recognizer.recognize_google(audio, language=self.language).strip()
 
-        if self.engine == "google":
+            if self.engine == "google":
+                return recognizer.recognize_google(audio, language=self.language).strip()
+
+            if hasattr(recognizer, f"recognize_{self.engine}"):
+                method = getattr(recognizer, f"recognize_{self.engine}")
+                return str(method(audio)).strip()
+
             return recognizer.recognize_google(audio, language=self.language).strip()
-
-        if hasattr(recognizer, f"recognize_{self.engine}"):
-            method = getattr(recognizer, f"recognize_{self.engine}")
-            return str(method(audio)).strip()
-
-        raise RuntimeError(
-            f"STT engine '{self.engine}' is not supported or not available."
-        )
+        except sr.UnknownValueError:
+            # Normal silence or unrecognized speech
+            return ""
+        except Exception as e:
+            log.warning("STT transcription exception: %s", e)
+            return ""
 
     async def transcribe_async(self, pcm16k: bytes) -> str:
         """Non-blocking transcription executed in a worker thread."""

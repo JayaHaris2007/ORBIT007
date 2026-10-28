@@ -73,15 +73,22 @@ def _write_speak_setting(enabled: bool) -> None:
 def get_voice_settings() -> dict[str, Any]:
     """Retrieve voice system status and persistent configurations."""
     engine = tts.get_tts_engine()
+    engine.preload_background()
+
     # Mask any file paths in error strings
     safe_error = None
     if engine.error:
         safe_error = engine.error.replace("\\", "/").split("/")[-1]
 
+    # Engine is ready if available or ready to load without unrecoverable error
+    engine_ready = engine.available or (engine.error is None)
+
     return {
         "speak_enabled": _read_speak_setting(),
         "live_enabled": _live_enabled_flag,
-        "engine_ready": engine.available,
+        "engine_ready": engine_ready,
+        "is_loading": getattr(engine, "is_loading", False),
+        "available": engine.available,
         "device": engine.device,
         "dtype": engine.dtype,
         "error": safe_error,
@@ -193,7 +200,9 @@ async def websocket_voice_endpoint(websocket: WebSocket) -> None:
         nonlocal is_speaking
         cleaned = text_clean.clean_text_for_speech(reply_text)
         sentences_list = sentences.split_sentences(cleaned, max_chars=config.MAX_SENTENCE_CHARS)
-        if not sentences_list or not _read_speak_setting():
+        if not sentences_list:
+            return
+        if mode != "live" and not _read_speak_setting():
             return
 
         if not tts_engine.available:

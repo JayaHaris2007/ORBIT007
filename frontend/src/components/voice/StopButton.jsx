@@ -16,3 +16,4 @@ export default function StopButton({ state = 'idle', onStop }) {
         </button>
     );
 }
+

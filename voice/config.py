@@ -87,7 +87,7 @@ SAMPLE_RATE = 24000
 
 # STT Configuration
 STT_ENGINE = os.environ.get("STT_ENGINE", "whisper_local").strip() or "whisper_local"
-STT_ALLOW_CLOUD = _bool("STT_ALLOW_CLOUD", False)
+STT_ALLOW_CLOUD = _bool("STT_ALLOW_CLOUD", True)
 STT_LANGUAGE = os.environ.get("STT_LANGUAGE", "en").strip() or "en"
 STT_MODEL = os.environ.get("STT_MODEL", "base").strip() or "base"
 
@@ -104,3 +104,4 @@ DISCORD_VOICE_ALLOWED_USER_IDS = _parse_id_allowlist(
 ) or _parse_id_allowlist("AI_DISCORD_ALLOWED_USER_IDS")
 DISCORD_VOICE_MAX_CHARS = _int("DISCORD_VOICE_MAX_CHARS", 500)
 DISCORD_CALL_IDLE_TIMEOUT_SECONDS = _int("DISCORD_CALL_IDLE_TIMEOUT_SECONDS", 600)
+

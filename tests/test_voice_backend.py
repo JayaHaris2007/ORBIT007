@@ -6,7 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app
-from voice import config, sentences, session, text_clean, tts
+from voice import config, sentences, session, stt, text_clean, tts
 
 
 # --- 1. Text Cleaner Tests ---
@@ -180,3 +180,20 @@ def test_voice_tts_endpoint_unavailable_engine():
     res = client.post("/api/voice/tts", json={"text": "Hello world"})
     assert res.status_code == 503
     assert "OmniVoice TTS engine is not available" in res.json()["error"]
+
+
+def test_stt_whisper_fallback_and_silence():
+    class FakeUnknownValueError(Exception):
+        pass
+
+    fake_sr = MagicMock()
+    fake_sr.UnknownValueError = FakeUnknownValueError
+    mock_rec = MagicMock()
+    mock_rec.recognize_whisper.side_effect = ImportError("No module named 'whisper'")
+    mock_rec.recognize_google.side_effect = FakeUnknownValueError("silence")
+    fake_sr.Recognizer.return_value = mock_rec
+
+    with patch.dict("sys.modules", {"speech_recognition": fake_sr}):
+        adapter = stt.STT(engine="whisper_local")
+        res = adapter.transcribe(b"\x00" * 3200)
+        assert res == ""

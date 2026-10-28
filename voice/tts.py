@@ -38,6 +38,7 @@ class OmniVoiceEngine:
         self._load_lock = threading.Lock()
         self.infer_lock = shared_lock or threading.Lock()
         self.available: bool = False
+        self.is_loading: bool = False
         self.error: str | None = None
 
         # Resolve voice reference or voice design if not explicitly provided
@@ -54,55 +55,66 @@ class OmniVoiceEngine:
                 }
                 log.info("OmniVoice configured with voice design instruct: %s", config.TTS_INSTRUCT)
 
+    def preload_background(self) -> None:
+        """Asynchronously warm up / load the model in a background daemon thread."""
+        if self._model is not None or self.is_loading:
+            return
+        t = threading.Thread(target=self.load, daemon=True, name="OmniVoice-Preload")
+        t.start()
+
     def load(self) -> None:
         """Lazily load the model on the configured device with CPU fallback."""
         with self._load_lock:
             if self._model is not None:
                 return
+            self.is_loading = True
             try:
-                from omnivoice import OmniVoice
-            except Exception as e:
-                self.error = repr(e)
-                self.available = False
-                log.exception("omnivoice import failed; voice disabled")
-                return
-
-            attempts = [(self.device, self.dtype)]
-            if self.device.startswith("cuda"):
-                attempts.append(("cpu", "float32"))  # Automatic fallback, e.g. on CUDA OOM
-
-            for dev, dt in attempts:
                 try:
-                    t0 = time.perf_counter()
-                    torch_dtype = getattr(torch, dt, torch.float32)
-                    self._model = OmniVoice.from_pretrained(
-                        self.model_id, device_map=dev, dtype=torch_dtype
-                    )
-                    load_time = time.perf_counter() - t0
-                    vram_mb = 0.0
-                    if torch.cuda.is_available() and dev.startswith("cuda"):
-                        vram_mb = torch.cuda.memory_allocated() / (1024 * 1024)
-                    self.device, self.dtype, self.available, self.error = (
-                        dev,
-                        dt,
-                        True,
-                        None,
-                    )
-                    log.info(
-                        "OmniVoice loaded successfully on %s (%s) in %.2fs (VRAM: %.1f MB)",
-                        dev,
-                        dt,
-                        load_time,
-                        vram_mb,
-                    )
-                    return
+                    from omnivoice import OmniVoice
                 except Exception as e:
                     self.error = repr(e)
-                    log.exception("OmniVoice load failed on %s (%s)", dev, dt)
-                    if dev.startswith("cuda") and torch.cuda.is_available():
-                        torch.cuda.empty_cache()
+                    self.available = False
+                    log.exception("omnivoice import failed; voice disabled")
+                    return
 
-            self.available = False
+                attempts = [(self.device, self.dtype)]
+                if self.device.startswith("cuda"):
+                    attempts.append(("cpu", "float32"))  # Automatic fallback, e.g. on CUDA OOM
+
+                for dev, dt in attempts:
+                    try:
+                        t0 = time.perf_counter()
+                        torch_dtype = getattr(torch, dt, torch.float32)
+                        self._model = OmniVoice.from_pretrained(
+                            self.model_id, device_map=dev, dtype=torch_dtype
+                        )
+                        load_time = time.perf_counter() - t0
+                        vram_mb = 0.0
+                        if torch.cuda.is_available() and dev.startswith("cuda"):
+                            vram_mb = torch.cuda.memory_allocated() / (1024 * 1024)
+                        self.device, self.dtype, self.available, self.error = (
+                            dev,
+                            dt,
+                            True,
+                            None,
+                        )
+                        log.info(
+                            "OmniVoice loaded successfully on %s (%s) in %.2fs (VRAM: %.1f MB)",
+                            dev,
+                            dt,
+                            load_time,
+                            vram_mb,
+                        )
+                        return
+                    except Exception as e:
+                        self.error = repr(e)
+                        log.exception("OmniVoice load failed on %s (%s)", dev, dt)
+                        if dev.startswith("cuda") and torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+
+                self.available = False
+            finally:
+                self.is_loading = False
 
     def reload_on_cpu(self) -> bool:
         """Switch from CUDA to CPU float32 if CUDA runs out of memory during inference."""
