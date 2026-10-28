@@ -11,15 +11,29 @@ from . import config
 log = logging.getLogger("spidey.voice.stt")
 
 # Categorization of SpeechRecognition engines
-OFFLINE_ENGINES = {"whisper", "whisper_local", "sphinx", "vosk"}
+OFFLINE_ENGINES = {
+    "whisper",
+    "whisper_local",
+    "sphinx",
+    "vosk",
+    "faster_whisper",
+    "tensorflow",
+}
 CLOUD_ENGINES = {
     "google",
     "google_cloud",
+    "amazon",
+    "assemblyai",
+    "azure",
     "bing",
+    "cohere_api",
+    "groq",
     "houndify",
     "ibm",
-    "amazon",
-    "azure",
+    "lex",
+    "openai",
+    "wit",
+    "api",
 }
 
 

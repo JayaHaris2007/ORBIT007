@@ -2,10 +2,16 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import { format } from 'date-fns';
-import { Bot, Check, History, MessageSquarePlus, PanelRightClose, Send, Trash2, X } from 'lucide-react';
+import { Bot, Check, History, MessageSquarePlus, PanelRightClose, Radio, Send, Trash2, X } from 'lucide-react';
 import { apiRequest } from '../services/api';
 import { useAppData } from '../context/AppDataContext';
 import { cleanAssistantText } from '../utils/textUtils';
+import { useVoice } from '../hooks/useVoice';
+import { useVoiceSession } from '../hooks/useVoiceSession';
+import SpeakToggle from './voice/SpeakToggle';
+import ListenButton from './voice/ListenButton';
+import StopButton from './voice/StopButton';
+import LiveOverlay from './voice/LiveOverlay';
 
 const ACTIVE_CHAT_KEY = 'spidey_active_chat_id';
 const MINIMIZED_KEY = 'spidey_panel_minimized';
@@ -47,6 +53,25 @@ const AssistantSidebar = () => {
     const conversationEndRef = useRef(null);
     const activeChatRef = useRef('');
     const requestSeq = useRef(0);
+
+    const voice = useVoice();
+    const [liveOpen, setLiveOpen] = useState(false);
+    const submitPromptRef = useRef(null);
+
+    const handleSpeechTranscript = useCallback((text) => {
+        if (text) submitPromptRef.current?.(text);
+    }, []);
+
+    const voiceSession = useVoiceSession({
+        onTranscript: handleSpeechTranscript,
+        audioQueue: voice.audioQueue
+    });
+
+    const isVoiceActive = voice.isSpeaking || voiceSession.state !== 'idle';
+    const handleVoiceStop = useCallback(() => {
+        voice.stop();
+        voiceSession.stopSession();
+    }, [voice, voiceSession]);
 
     // Map a page key from the backend to a real app route; unknown pages do nothing.
     const goToPage = useCallback((page) => {
@@ -236,6 +261,9 @@ const AssistantSidebar = () => {
             if (activeChatRef.current !== chatId) return;
             setMessages(data.messages || []);
             if (data.navigate) goToPage(data.navigate);
+            if (data.response && voice.speakEnabled) {
+                voice.speak(data.response);
+            }
             refreshChats();
             // The assistant may have created or completed tasks, habits, reminders or memories.
             refresh();
@@ -249,6 +277,7 @@ const AssistantSidebar = () => {
             setLoading(false);
         }
     };
+    submitPromptRef.current = submitPrompt;
 
     const sendMessage = (event) => {
         event.preventDefault();
@@ -301,9 +330,26 @@ const AssistantSidebar = () => {
 
                 <div className="flex shrink-0 items-center justify-between px-5 pb-2 pt-4">
                     <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-textMuted">Conversation</span>
-                    <span className="text-[10px] font-medium uppercase tracking-[0.12em] text-neutral-600">
-                        {chats.length ? `${chats.length} saved` : 'No history'}
-                    </span>
+                    <div className="flex items-center gap-2">
+                        <SpeakToggle
+                            speakEnabled={voice.speakEnabled}
+                            engineReady={voice.engineReady}
+                            onToggle={voice.toggleSpeak}
+                        />
+                        <button
+                            type="button"
+                            onClick={() => {
+                                setLiveOpen(true);
+                                voiceSession.startSession('live', chatId);
+                            }}
+                            disabled={!chatId}
+                            className="flex items-center gap-1.5 rounded-lg border border-orange-500/30 bg-orange-500/10 px-2 py-1 text-[11px] font-medium text-orange-300 transition-colors hover:border-orange-400 hover:bg-orange-500/20 disabled:opacity-40"
+                            title="Start Live hands-free conversation"
+                        >
+                            <Radio size={12} className="text-orange-400 animate-pulse" />
+                            <span>Live</span>
+                        </button>
+                    </div>
                 </div>
 
                 {historyOpen && (
@@ -411,6 +457,22 @@ const AssistantSidebar = () => {
                             className="max-h-28 min-h-[38px] flex-1 resize-none bg-transparent px-2 py-2 text-xs leading-relaxed text-white outline-none placeholder:text-neutral-500"
                             disabled={!chatId}
                         />
+                        <StopButton
+                            state={isVoiceActive ? 'speaking' : 'idle'}
+                            onStop={handleVoiceStop}
+                        />
+                        <ListenButton
+                            state={voiceSession.state}
+                            cloudStt={voice.cloudStt}
+                            onClick={() => {
+                                if (voiceSession.state === 'listening') {
+                                    voiceSession.stopSession();
+                                } else {
+                                    voiceSession.startSession('listen', chatId);
+                                }
+                            }}
+                            disabled={!chatId || loading}
+                        />
                         <button
                             type="submit"
                             disabled={loading || !prompt.trim() || !chatId}
@@ -420,10 +482,26 @@ const AssistantSidebar = () => {
                             <Send size={15} />
                         </button>
                     </div>
+                    {voiceSession.transcript && voiceSession.state === 'transcribing' && (
+                        <p className="mt-1 px-1 text-[11px] text-orange-300 italic animate-pulse">Transcribing: {voiceSession.transcript}...</p>
+                    )}
                     <p className="mt-2 px-1 text-[10px] text-neutral-600">Enter to send · Shift + Enter for a new line</p>
                     {error && <p className="mt-2 px-1 text-xs text-red-300">{error}</p>}
                 </form>
             </aside>
+
+            <LiveOverlay
+                isOpen={liveOpen}
+                state={voiceSession.state}
+                transcript={voiceSession.transcript}
+                reply={voiceSession.reply}
+                timing={voiceSession.timing}
+                onStopTurn={voiceSession.interrupt}
+                onClose={() => {
+                    setLiveOpen(false);
+                    voiceSession.stopSession();
+                }}
+            />
         </>
     );
 };
