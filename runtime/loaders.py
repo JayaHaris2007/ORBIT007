@@ -50,7 +50,7 @@ def load_qwen_eager(
     gpu_limit: str = "5GiB",
     cpu_limit: str = "6GiB",
     generation_lock: Any | None = None,
-) -> tuple[Any, Any]:
+) -> tuple[Any, Any, float]:
     """Load Qwen3-4B in 4-bit NF4 quantization once, warm up, and register."""
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
