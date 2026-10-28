@@ -73,22 +73,32 @@ def _write_speak_setting(enabled: bool) -> None:
 def get_voice_settings() -> dict[str, Any]:
     """Retrieve voice system status and persistent configurations."""
     engine = tts.get_tts_engine()
-    engine.preload_background()
 
-    # Mask any file paths in error strings
     safe_error = None
-    if engine.error:
-        safe_error = engine.error.replace("\\", "/").split("/")[-1]
+    err = engine.error
+    if not err:
+        try:
+            from runtime.models import REGISTRY
+            err = REGISTRY.errors.get("tts")
+        except Exception:
+            pass
+    if err:
+        safe_error = str(err).replace("\\", "/").split("/")[-1]
 
-    # Engine is ready if available or ready to load without unrecoverable error
-    engine_ready = engine.available or (engine.error is None)
+    engine_ready = engine.available
+    if not engine_ready:
+        try:
+            from runtime.models import REGISTRY
+            engine_ready = REGISTRY.is_ready("tts")
+        except Exception:
+            pass
 
     return {
         "speak_enabled": _read_speak_setting(),
         "live_enabled": _live_enabled_flag,
         "engine_ready": engine_ready,
         "is_loading": getattr(engine, "is_loading", False),
-        "available": engine.available,
+        "available": engine.available or engine_ready,
         "device": engine.device,
         "dtype": engine.dtype,
         "error": safe_error,
@@ -288,6 +298,8 @@ async def websocket_voice_endpoint(websocket: WebSocket) -> None:
     try:
         while True:
             msg = await websocket.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
             if "text" in msg:
                 try:
                     payload = json.loads(msg["text"])
@@ -352,9 +364,10 @@ async def websocket_voice_endpoint(websocket: WebSocket) -> None:
                             speech_detected = False
                             voice_sess.pcm.clear()
 
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):
         pass
     except Exception as e:
         log.exception("Voice WebSocket error: %s", e)
     finally:
+        voice_sess.reset()
         session.remove_voice_session(client_id)

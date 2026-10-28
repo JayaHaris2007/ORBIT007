@@ -407,6 +407,36 @@ async def on_command_error(
     LOGGER.error("Discord command failed: %s", error)
 
 
+_discord_task: asyncio.Task | None = None
+
+
+async def start_discord_bot_in_process(token: str) -> None:
+    """Start the Discord bot inside the existing FastAPI server event loop."""
+    global _discord_task
+    if _discord_task is not None and not _discord_task.done():
+        LOGGER.info("Discord bot is already running in-process.")
+        return
+    LOGGER.info("Starting Discord bot in-process with FastAPI server...")
+    _discord_task = asyncio.create_task(bot.start(token))
+
+
+async def stop_discord_bot_in_process() -> None:
+    """Stop the in-process Discord bot gracefully."""
+    global _discord_task
+    if bot.is_ready():
+        LOGGER.info("Closing in-process Discord bot connection...")
+        try:
+            await bot.close()
+        except Exception as e:
+            LOGGER.warning("Error closing Discord bot: %s", e)
+    if _discord_task is not None:
+        try:
+            await _discord_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _discord_task = None
+
+
 def main() -> None:
     token = os.environ.get("AI_DISCORD_TOKEN", "").strip()
     if not token:
@@ -419,6 +449,20 @@ def main() -> None:
         level=os.environ.get("AI_DISCORD_LOG_LEVEL", "INFO").upper(),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Check if the S.P.I.D.E.Y server is already running with the in-process bot
+    try:
+        import urllib.request
+        req = urllib.request.urlopen("http://127.0.0.1:8000/api/health", timeout=1.5)
+        if req.status == 200:
+            print("\n[INFO] S.P.I.D.E.Y server is already running on port 8000 with the in-process Discord bot.")
+            print("To avoid duplicate model loading in VRAM, the bot runs inside the server process.")
+            print("No separate discord_bot.py process is needed. Exiting.\n")
+            return
+    except Exception:
+        pass
+
+    from runtime.guard import acquire_model_process_lock
+    _model_guard = acquire_model_process_lock()  # noqa: F841
     guard = _acquire_single_instance()  # noqa: F841 - held for the process lifetime
     bot.run(token)
 

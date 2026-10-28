@@ -773,26 +773,19 @@ class MemoryStore:
     def embed(self, text: str) -> list[float] | None:
         if os.environ.get("AI_ENABLE_SEMANTIC_MEMORY", "1") == "0":
             return None
-        if self._embedder is None:
-            try:
-                from sentence_transformers import SentenceTransformer
-                self._embedder = SentenceTransformer(
-                    os.environ.get(
-                        "AI_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
-                    ),
-                    device="cpu",
-                )
-            except ImportError:
-                if not self._embedding_warning_printed:
-                    print("Semantic memory unavailable; using keyword retrieval.")
-                    self._embedding_warning_printed = True
-                return None
-            except Exception as error:
-                if not self._embedding_warning_printed:
-                    print(f"Semantic memory model unavailable; using keyword retrieval: {error}")
-                    self._embedding_warning_printed = True
-                return None
-        return self._embedder.encode(text, normalize_embeddings=True).tolist()
+        if self._embedder is not None:
+            return self._embedder.encode(text, normalize_embeddings=True).tolist()
+        try:
+            from runtime.models import REGISTRY
+            if REGISTRY.is_ready("embedder"):
+                self._embedder = REGISTRY.get("embedder")
+                return self._embedder.encode(text, normalize_embeddings=True).tolist()
+        except Exception:
+            pass
+        if not self._embedding_warning_printed:
+            print("Semantic memory model unavailable; using keyword retrieval.")
+            self._embedding_warning_printed = True
+        return None
 
     def build_context(
         self,

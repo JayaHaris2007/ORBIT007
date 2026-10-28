@@ -60,14 +60,12 @@ class OmniVoiceEngine:
                 log.info("OmniVoice configured with voice design instruct: %s", config.TTS_INSTRUCT)
 
     def preload_background(self) -> None:
-        """Asynchronously warm up / load the model in a background daemon thread."""
-        if self._model is not None or self.is_loading:
+        """No-op when server eager loading is active; preserved for backward compatibility."""
+        if self._model is not None or self.available:
             return
-        t = threading.Thread(target=self.load, daemon=True, name="OmniVoice-Preload")
-        t.start()
 
-    def load(self) -> None:
-        """Lazily load the model on the configured device with CPU fallback."""
+    def _load_eager(self) -> None:
+        """Perform the actual model weight loading once at startup."""
         with self._load_lock:
             if self._model is not None:
                 return
@@ -119,6 +117,29 @@ class OmniVoiceEngine:
                 self.available = False
             finally:
                 self.is_loading = False
+
+    def load(self) -> None:
+        """Thin wrapper preserving backward compatibility. Does NOT trigger lazy loads in conversation."""
+        if self._model is not None or self.available:
+            return
+        try:
+            from runtime.models import REGISTRY
+            if REGISTRY.is_ready("tts"):
+                reg_engine = REGISTRY.get("tts")
+                self._model = reg_engine._model
+                self.device = reg_engine.device
+                self.dtype = reg_engine.dtype
+                self.available = reg_engine.available
+                self.error = reg_engine.error
+                return
+            elif REGISTRY.status.get("tts") == "failed":
+                self.available = False
+                self.error = REGISTRY.errors.get("tts", "Initialization failed")
+                return
+        except Exception:
+            pass
+        # Fallback for standalone test runners without server lifespan
+        self._load_eager()
 
     def reload_on_cpu(self) -> bool:
         """Switch from CUDA to CPU float32 if CUDA runs out of memory during inference."""
@@ -205,6 +226,16 @@ def get_tts_engine() -> OmniVoiceEngine:
     """Return the global TTS engine singleton."""
     global _ENGINE
     with _ENGINE_LOCK:
+        if _ENGINE is not None and _ENGINE.available:
+            return _ENGINE
+        try:
+            from runtime.models import REGISTRY
+            if REGISTRY.is_ready("tts"):
+                reg = REGISTRY.get("tts")
+                _ENGINE = reg
+                return _ENGINE
+        except Exception:
+            pass
         if _ENGINE is None:
             _ENGINE = OmniVoiceEngine()
         return _ENGINE
@@ -215,3 +246,9 @@ def set_tts_engine(engine: OmniVoiceEngine | None) -> None:
     global _ENGINE
     with _ENGINE_LOCK:
         _ENGINE = engine
+        try:
+            from runtime.models import REGISTRY
+            if engine is not None:
+                REGISTRY.register("tts", engine)
+        except Exception:
+            pass

@@ -5,10 +5,20 @@ import re
 import threading
 import time
 import uuid
+import warnings
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+# Filter benign pydub warning about missing system ffmpeg
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="pydub.utils")
+
+# Set Hugging Face offline flags unless explicitly opted out with SPIDEY_ALLOW_HUB=1
+if os.environ.get("SPIDEY_ALLOW_HUB") != "1":
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+    os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 try:
     from dotenv import load_dotenv
@@ -77,6 +87,16 @@ def ensure_model_loaded() -> None:
     with model_load_lock:
         if model is not None and tokenizer is not None:
             return
+        from runtime.models import REGISTRY
+        if REGISTRY.is_ready("llm"):
+            model, tokenizer = REGISTRY.get("llm")
+            cuda_available = torch.cuda.is_available()
+            metrics = REGISTRY.metrics.get("llm", {})
+            load_seconds = metrics.get("load_time", 0.0)
+            return
+        if REGISTRY.status.get("llm") == "failed":
+            raise RuntimeError(f"Qwen LLM failed to load during startup: {REGISTRY.errors.get('llm')}")
+
         torch.set_num_threads(CPU_THREADS)
         try:
             torch.set_num_interop_threads(CPU_INTEROP_THREADS)
@@ -131,6 +151,8 @@ def ensure_model_loaded() -> None:
                 "RAM placement limits. Close other GPU applications and try again."
             ) from error
         load_seconds = time.perf_counter() - load_started
+        from runtime.models import REGISTRY
+        REGISTRY.register("llm", (model, tokenizer))
         print_device_diagnostics()
 
 
@@ -1314,7 +1336,7 @@ def _schedule_weekly_learning_nudge(provider: str = "local") -> None:
             CronTrigger(day_of_week="mon", hour=9, minute=0,
                         timezone="Asia/Kolkata"),
             args=[provider],
-            id=f"{WEEKLY_LEARNING_NUDGE_JOB}-{provider}",
+            id=WEEKLY_LEARNING_NUDGE_JOB if provider == "local" else f"{WEEKLY_LEARNING_NUDGE_JOB}-{provider}",
             replace_existing=True,
         )
     except Exception as error:  # pragma: no cover - defensive
@@ -2528,7 +2550,14 @@ def generate_response(
     memories: list[dict[str, Any]] | None = None,
     on_token: Any | None = None,
 ) -> str:
+    global model, tokenizer
     ensure_model_loaded()
+    if model is None or tokenizer is None:
+        from runtime.models import REGISTRY
+        if REGISTRY.is_ready("llm"):
+            model, tokenizer = REGISTRY.get("llm")
+        else:
+            raise RuntimeError("The language model is currently unavailable.")
     if not prompt.strip():
         raise ValueError("Prompt cannot be empty.")
     if len(prompt) > MAX_PROMPT_CHARS:
@@ -2622,17 +2651,42 @@ def generate_response(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    await asyncio.to_thread(ensure_model_loaded)
-    _restore_reminders(provider="local")
-    # Learning tracker tables and starter roadmaps are additive and idempotent.
-    # Never let a learning-module problem prevent the assistant from booting.
-    init_learning_module("local")
-    purge_voice_tmp()
+    from runtime.guard import acquire_model_process_lock, release_model_process_lock
+    acquire_model_process_lock()
     try:
+        from runtime.loaders import load_all_models_eager
+        await asyncio.to_thread(
+            load_all_models_eager,
+            MODEL_DIR,
+            GPU_MEMORY_LIMIT,
+            CPU_MEMORY_LIMIT,
+            generation_lock,
+        )
+        await asyncio.to_thread(ensure_model_loaded)
+        _restore_reminders(provider="local")
+        init_learning_module("local")
+        purge_voice_tmp()
+
+        discord_token = os.environ.get("AI_DISCORD_TOKEN", "").strip()
+        if discord_token:
+            try:
+                from discord_bot import start_discord_bot_in_process
+                await start_discord_bot_in_process(discord_token)
+            except Exception as err:
+                print(f"Warning: Failed to start in-process Discord bot: {err}")
+
         yield
     finally:
+        discord_token = os.environ.get("AI_DISCORD_TOKEN", "").strip()
+        if discord_token:
+            try:
+                from discord_bot import stop_discord_bot_in_process
+                await stop_discord_bot_in_process()
+            except Exception:
+                pass
         if reminder_scheduler.running:
             reminder_scheduler.shutdown(wait=False)
+        release_model_process_lock()
 
 
 app = FastAPI(title="S.P.I.D.E.Y Local Assistant", lifespan=lifespan)
@@ -2688,14 +2742,16 @@ app.include_router(voice_ws_router)
 
 @app.get("/health")
 def health():
+    from runtime.models import REGISTRY
     return {
         "status": "ok",
         "api_version": "spidey-local-2026-11",
         "model": "Qwen3-1.7B",
         "cuda": cuda_available,
-        "load_seconds": round(load_seconds, 2),
+        "load_seconds": round(load_seconds, 2) if load_seconds is not None else 0.0,
         "database": str(DATABASE_PATH),
         "semantic_memory": os.environ.get("AI_ENABLE_SEMANTIC_MEMORY", "1") != "0",
+        "models": REGISTRY.get_status_summary(),
     }
 
 
