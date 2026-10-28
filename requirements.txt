@@ -7,11 +7,11 @@ numpy
 fastapi
 uvicorn[standard]
 sentence-transformers
-discord.py
+discord.py[voice]
 apscheduler
 rapidfuzz
 dateparser
 python-dotenv
 tavily-python
 omnivoice
-soundfile
+SpeechRecognition

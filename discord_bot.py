@@ -18,6 +18,7 @@ import discord
 from discord.ext import commands
 
 import app
+from voice.discord_voice import get_discord_voice_manager
 
 
 LOGGER = logging.getLogger("spidey.discord")
@@ -246,6 +247,12 @@ class SpideyBot(commands.Bot):
             app.memory_store.add_message(chat_id, "assistant", response)
             for chunk in _split_response(response):
                 await message.reply(chunk)
+            if message.guild is not None:
+                voice_mgr = get_discord_voice_manager()
+                if voice_mgr.is_call_active(message.guild.id):
+                    asyncio.create_task(
+                        voice_mgr.speak_text(message.guild.id, message.author.id, response)
+                    )
             return
 
         app.memory_store.add_message(chat_id, "user", prompt)
@@ -275,6 +282,12 @@ class SpideyBot(commands.Bot):
         app.memory_store.add_message(chat_id, "assistant", response)
         for chunk in _split_response(response):
             await message.reply(chunk)
+        if message.guild is not None:
+            voice_mgr = get_discord_voice_manager()
+            if voice_mgr.is_call_active(message.guild.id):
+                asyncio.create_task(
+                    voice_mgr.speak_text(message.guild.id, message.author.id, response)
+                )
 
 
 bot = SpideyBot()
@@ -293,10 +306,65 @@ async def ping_command(ctx: commands.Context[Any]) -> None:
     await ctx.reply(f"Online. Gateway latency {detail}.")
 
 
+@bot.group(name="call", invoke_without_command=True)
+async def call_group(ctx: commands.Context[Any]) -> None:
+    """Voice call controls: !call join, !call leave, !call stop, !call voice on|off."""
+    await ctx.reply("Usage: `!call join`, `!call leave`, `!call stop`, `!call voice on|off`")
+
+
+@call_group.command(name="join")
+async def call_join(ctx: commands.Context[Any]) -> None:
+    voice_mgr = get_discord_voice_manager()
+    success, msg = await voice_mgr.join_call(ctx.message)
+    await ctx.reply(msg)
+
+
+@call_group.command(name="leave")
+async def call_leave(ctx: commands.Context[Any]) -> None:
+    if ctx.guild is None:
+        await ctx.reply("Calls are only available in a server.")
+        return
+    voice_mgr = get_discord_voice_manager()
+    msg = await voice_mgr.leave_call(ctx.guild.id)
+    await ctx.reply(msg)
+
+
+@call_group.command(name="stop")
+async def call_stop(ctx: commands.Context[Any]) -> None:
+    if ctx.guild is None:
+        return
+    voice_mgr = get_discord_voice_manager()
+    msg = voice_mgr.stop_speaking(ctx.guild.id)
+    await ctx.reply(msg)
+
+
+@call_group.command(name="voice")
+async def call_voice_toggle(ctx: commands.Context[Any], mode: str = "") -> None:
+    if ctx.guild is None:
+        return
+    voice_mgr = get_discord_voice_manager()
+    mode_clean = mode.strip().lower()
+    if mode_clean in {"on", "enable", "1"}:
+        msg = voice_mgr.set_voice_enabled(ctx.guild.id, True)
+    elif mode_clean in {"off", "disable", "0"}:
+        msg = voice_mgr.set_voice_enabled(ctx.guild.id, False)
+    else:
+        msg = "Usage: `!call voice on` or `!call voice off`"
+    await ctx.reply(msg)
+
+
 @bot.event
 async def on_message(message: discord.Message) -> None:
     if message.author.bot:
         return
+    if message.guild is not None:
+        clean_text = message.content.strip().lower()
+        if clean_text in {"stop", "stop talking"}:
+            voice_mgr = get_discord_voice_manager()
+            if voice_mgr.is_call_active(message.guild.id):
+                reply_msg = voice_mgr.stop_speaking(message.guild.id)
+                await message.reply(reply_msg)
+                return
     if bot.user is not None and bot.user in message.mentions:
         prompt = message.content.replace(f"<@{bot.user.id}>", "")
         prompt = prompt.replace(f"<@!{bot.user.id}>", "").strip()
