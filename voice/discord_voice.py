@@ -17,6 +17,12 @@ from . import config, sentences, text_clean, tts
 
 log = logging.getLogger("spidey.voice.discord")
 
+if not discord.opus.is_loaded():
+    try:
+        discord.opus._load_default()
+    except Exception as e:
+        log.warning("Could not auto-load discord opus: %s", e)
+
 FRAME_BYTES = 3840  # 20 ms of 48 kHz, 2 channels, 16-bit
 
 

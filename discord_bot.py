@@ -199,7 +199,7 @@ class SpideyBot(commands.Bot):
     ) -> None:
         prompt = prompt.strip()
         if not prompt:
-            await message.reply("Use `!ask <message>` or mention me with a question.")
+            await message.reply("Use `!ask <message>` or `!input <message>` or mention me with a question.")
             return
         if len(prompt) > app.MAX_PROMPT_CHARS:
             await message.reply(
@@ -298,6 +298,11 @@ async def ask_command(ctx: commands.Context[Any], *, prompt: str = "") -> None:
     await bot.respond_to_prompt(ctx.message, prompt)
 
 
+@bot.command(name="input")
+async def input_command(ctx: commands.Context[Any], *, prompt: str = "") -> None:
+    await bot.respond_to_prompt(ctx.message, prompt)
+
+
 @bot.command(name="ping")
 async def ping_command(ctx: commands.Context[Any]) -> None:
     """Instant health check that never loads the model."""
@@ -373,6 +378,20 @@ async def on_message(message: discord.Message) -> None:
     if message.guild is None and not message.content.startswith(bot.command_prefix):
         await bot.respond_to_prompt(message, message.content)
         return
+    if message.guild is not None and not message.content.startswith(bot.command_prefix):
+        voice_mgr = get_discord_voice_manager()
+        call = voice_mgr.get_call(message.guild.id)
+        if call is not None:
+            author_vc = getattr(getattr(message.author, "voice", None), "channel", None)
+            is_in_text_channel = (call.text_channel_id == message.channel.id)
+            is_author_in_voice = (
+                author_vc is not None
+                and getattr(call.voice_client, "channel", None) is not None
+                and author_vc.id == call.voice_client.channel.id
+            )
+            if is_in_text_channel or is_author_in_voice:
+                await bot.respond_to_prompt(message, message.content)
+                return
     await bot.process_commands(message)
 
 

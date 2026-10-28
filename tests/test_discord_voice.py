@@ -1,7 +1,7 @@
 """Tests for Discord voice bridge, PCM conversion, QueuePCMSource, and call controls."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
 
@@ -123,5 +123,46 @@ def test_discord_voice_manager_lifecycle():
         assert leave_msg == "Left voice channel."
         assert mgr.is_call_active(999) is False
         mock_vc.disconnect.assert_called_once()
+
+    asyncio.run(_test())
+
+
+def test_discord_input_command_and_normal_message_in_call():
+    async def _test():
+        import discord_bot
+
+        # 1. Test input_command (!input <prompt>)
+        mock_ctx = MagicMock()
+        mock_ctx.message = MagicMock()
+        with patch.object(
+            discord_bot.bot, "respond_to_prompt", new_callable=AsyncMock
+        ) as mock_respond:
+            await discord_bot.input_command(mock_ctx, prompt="Hello world")
+            mock_respond.assert_called_once_with(mock_ctx.message, "Hello world")
+
+        # 2. Test normal message in call (no prefix)
+        mock_msg = MagicMock()
+        mock_msg.author.bot = False
+        mock_msg.content = "Normal conversation message"
+        mock_msg.guild.id = 777
+        mock_msg.channel.id = 555
+        mock_msg.mentions = []
+
+        mock_mgr = MagicMock()
+        mock_call = MagicMock()
+        mock_call.text_channel_id = 555
+        mock_mgr.get_call.return_value = mock_call
+        mock_mgr.is_call_active.return_value = True
+
+        with patch.object(
+            discord_bot, "get_discord_voice_manager", return_value=mock_mgr
+        ):
+            with patch.object(
+                discord_bot.bot, "respond_to_prompt", new_callable=AsyncMock
+            ) as mock_respond:
+                await discord_bot.on_message(mock_msg)
+                mock_respond.assert_called_once_with(
+                    mock_msg, "Normal conversation message"
+                )
 
     asyncio.run(_test())
