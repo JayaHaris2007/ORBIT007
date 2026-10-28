@@ -2,7 +2,7 @@
 
 This project combines the local models and modern voice pipeline:
 
-- `Models/LLM/` contains a local Qwen3-1.7B instruction model for generating text.
+- `Models/LLM/` contains a local Qwen3-4B instruction model for generating text.
 - `voice/` contains the complete voice engine powered by **OmniVoice** (`k2-fsa/OmniVoice`, 0.6B params) for text-to-speech, and `SpeechRecognition` for speech-to-text.
 - `Models/voice/` contains legacy Kokoro v1.0 files (superseded by OmniVoice).
 
@@ -121,9 +121,10 @@ up to approximately 5 GiB of GPU memory and 6 GiB of CPU memory, and does not
 use disk offload. If these limits are insufficient, startup stops with an
 error instead of exhausting system RAM or paging the model to disk.
 
-The local checkpoint is **Qwen3-1.7B** (`Qwen/Qwen3-1.7B`), with about
-1.7 billion parameters. The LLM uses CUDA when available, while
-Kokoro voice synthesis is deliberately kept on the CPU.
+The local checkpoint is **Qwen3-4B** (`Qwen/Qwen3-4B`), with about
+4 billion parameters. The LLM uses CUDA when available in 4-bit NF4, while
+
+OmniVoice runs in float16 on GPU (with CPU fallback).
 
 ### Laptop resource safeguards
 

@@ -2746,7 +2746,7 @@ def health():
     return {
         "status": "ok",
         "api_version": "spidey-local-2026-11",
-        "model": "Qwen3-1.7B",
+        "model": "Qwen3-4B",
         "cuda": cuda_available,
         "load_seconds": round(load_seconds, 2) if load_seconds is not None else 0.0,
         "database": str(DATABASE_PATH),
