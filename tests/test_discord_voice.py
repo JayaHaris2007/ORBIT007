@@ -11,6 +11,9 @@ from voice.discord_voice import (
     DiscordVoiceManager,
     QueuePCMSource,
     to_discord_pcm,
+    from_discord_pcm,
+    _calculate_discord_pcm_energy,
+    DiscordVoiceAudioSink,
 )
 
 
@@ -166,3 +169,113 @@ def test_discord_input_command_and_normal_message_in_call():
                 )
 
     asyncio.run(_test())
+
+
+def test_from_discord_pcm_conversion():
+    # Empty bytes test
+    assert from_discord_pcm(b"") == b""
+
+    # 1 second of 48 kHz stereo sine wave: 48000 samples * 2 channels * 2 bytes = 192000 bytes
+    t = np.linspace(0, 1, 48000, dtype=np.float32)
+    sine = (np.sin(2 * np.pi * 440 * t) * 30000).astype("<i2")
+    stereo = np.column_stack([sine, sine]).tobytes()
+    assert len(stereo) == 192000
+
+    pcm16k = from_discord_pcm(stereo)
+    # 16000 samples * 1 channel * 2 bytes = 32000 bytes
+    assert len(pcm16k) == 32000
+    samples = np.frombuffer(pcm16k, dtype="<i2")
+    assert samples.max() <= 32767
+    assert samples.min() >= -32768
+
+
+def test_calculate_discord_pcm_energy():
+    assert _calculate_discord_pcm_energy(b"") == 0.0
+    silence = b"\x00" * 3840
+    assert _calculate_discord_pcm_energy(silence) == 0.0
+
+    # Loud sine wave
+    t = np.linspace(0, 0.02, 960, dtype=np.float32)
+    sine = (np.sin(2 * np.pi * 440 * t) * 10000).astype("<i2")
+    stereo = np.column_stack([sine, sine]).tobytes()
+    energy = _calculate_discord_pcm_energy(stereo)
+    assert energy > 5000.0
+
+
+def test_discord_voice_audio_sink_vad_and_barge_in():
+    from voice.discord_voice import DiscordVoiceCall, DiscordVoiceAudioSink, _VOICE_RECV_AVAILABLE
+    if not _VOICE_RECV_AVAILABLE:
+        pytest.skip("voice_recv not available")
+
+    call = MagicMock(spec=DiscordVoiceCall)
+    call.is_speaking = True
+    cancel_mock = MagicMock()
+    call.cancel = cancel_mock
+    call.source = MagicMock()
+    bot = MagicMock()
+    mgr = MagicMock()
+    mgr.is_user_allowed.return_value = True
+
+    sink = DiscordVoiceAudioSink(call, bot, asyncio.new_event_loop(), mgr)
+
+    # 1. Ignored if user is a bot
+    bot_user = MagicMock()
+    bot_user.bot = True
+    sink.write(bot_user, MagicMock(pcm=b"\x10\x10" * 960))
+    assert len(sink.buffers) == 0
+
+    # 2. Ignored if user not allowed
+    mgr.is_user_allowed.return_value = False
+    human = MagicMock()
+    human.bot = False
+    human.id = 1234
+    human.display_name = "Alice"
+    sink.write(human, MagicMock(pcm=b"\x10\x10" * 960))
+    assert len(sink.buffers) == 0
+
+    # 3. Allowed human with loud audio triggers barge-in
+    mgr.is_user_allowed.return_value = True
+    t = np.linspace(0, 0.02, 960, dtype=np.float32)
+    loud = (np.sin(2 * np.pi * 440 * t) * 20000).astype("<i2")
+    loud_pcm = np.column_stack([loud, loud]).tobytes()
+
+    sink.write(human, MagicMock(pcm=loud_pcm))
+    cancel_mock.set.assert_called_once()
+    call.source.clear.assert_called_once()
+    assert 1234 in sink.buffers
+    assert sink.buffers[1234]["speech_detected"] is True
+
+
+def test_respond_to_voice_utterance():
+    async def _test():
+        import discord
+        import discord_bot
+        mock_user = MagicMock(spec=discord.Member)
+        mock_user.id = 42
+        mock_user.display_name = "Bob"
+
+        mock_channel = AsyncMock(spec=discord.TextChannel)
+        mock_channel.send = AsyncMock()
+
+        with patch.object(discord_bot.bot, "get_channel", return_value=mock_channel):
+            with patch("app._handle_local_command", return_value=("The time is 5:00 PM.", "local_clock")):
+                with patch.object(discord_bot, "get_discord_voice_manager") as mock_get_mgr:
+                    mock_mgr = MagicMock()
+                    mock_mgr.is_call_active.return_value = True
+                    mock_mgr.speak_text = AsyncMock()
+                    mock_get_mgr.return_value = mock_mgr
+
+                    await discord_bot.bot.respond_to_voice_utterance(
+                        guild_id=101,
+                        user=mock_user,
+                        text_channel_id=202,
+                        prompt="what time is it",
+                    )
+
+                    # Should send transcript line
+                    mock_channel.send.assert_any_call("🎙️ **Bob**: what time is it")
+                    # Should send response line
+                    mock_channel.send.assert_any_call("The time is 5:00 PM.")
+
+    asyncio.run(_test())
+

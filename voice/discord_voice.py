@@ -36,6 +36,27 @@ def to_discord_pcm(wav24k: np.ndarray) -> bytes:
     return np.column_stack([mono, mono]).tobytes()  # Interleaved L, R
 
 
+def from_discord_pcm(pcm48k_stereo: bytes) -> bytes:
+    """Convert 48 kHz stereo s16le PCM bytes from Discord to 16 kHz mono s16le PCM bytes for STT."""
+    if not pcm48k_stereo:
+        return b""
+    arr = np.frombuffer(pcm48k_stereo, dtype="<i2").reshape(-1, 2)
+    mono = (arr[:, 0].astype(np.float32) + arr[:, 1].astype(np.float32)) / (2.0 * 32768.0)
+    t = torch.from_numpy(mono).unsqueeze(0)
+    res = torchaudio.functional.resample(t, 48000, 16000).squeeze(0).clamp(-1, 1)
+    return (res.numpy() * 32767).astype("<i2").tobytes()
+
+
+def _calculate_discord_pcm_energy(pcm48k_stereo: bytes) -> float:
+    """Calculate RMS energy from 48 kHz stereo PCM bytes."""
+    if not pcm48k_stereo:
+        return 0.0
+    arr = np.frombuffer(pcm48k_stereo, dtype="<i2")
+    if len(arr) == 0:
+        return 0.0
+    return float(np.sqrt(np.mean(arr.astype(np.float64) ** 2)))
+
+
 class QueuePCMSource(discord.AudioSource):
     """Continuous stream AudioSource fed from synthesized PCM chunks with silence padding."""
 
@@ -71,6 +92,14 @@ class QueuePCMSource(discord.AudioSource):
         return False
 
 
+try:
+    from discord.ext import voice_recv
+    _VOICE_RECV_AVAILABLE = True
+except ImportError:
+    voice_recv = None
+    _VOICE_RECV_AVAILABLE = False
+
+
 class DiscordVoiceCall:
     """Encapsulates active call state for a single Discord guild."""
 
@@ -80,14 +109,128 @@ class DiscordVoiceCall:
         voice_client: Any,
         text_channel_id: int,
         source: QueuePCMSource,
+        sink: Any | None = None,
     ) -> None:
         self.guild_id = guild_id
         self.voice_client = voice_client
         self.text_channel_id = text_channel_id
         self.source = source
+        self.sink = sink
         self.voice_enabled = True
+        self.is_speaking = False
         self.cancel = threading.Event()
         self.last_active_time = time.perf_counter()
+if _VOICE_RECV_AVAILABLE and voice_recv is not None:
+    class DiscordVoiceAudioSink(voice_recv.AudioSink):
+        """Audio sink receiving user voice packets from Discord and triggering STT on silence."""
+
+        def __init__(
+            self,
+            call: DiscordVoiceCall,
+            bot: Any,
+            loop: asyncio.AbstractEventLoop,
+            manager: DiscordVoiceManager,
+        ) -> None:
+            super().__init__()
+            self.call = call
+            self.bot = bot
+            self.loop = loop
+            self.manager = manager
+            self.buffers: dict[int, dict[str, Any]] = {}
+            self._lock = threading.Lock()
+
+        def wants_opus(self) -> bool:
+            return False
+
+        def write(self, user: discord.Member | discord.User | None, data: voice_recv.VoiceData) -> None:
+            if user is None or getattr(user, "bot", False):
+                return
+            if not self.manager.is_user_allowed(user.id):
+                return
+
+            pcm = data.pcm
+            if not pcm:
+                return
+
+            now = time.perf_counter()
+            energy = _calculate_discord_pcm_energy(pcm)
+
+            # Barge-in: if assistant is speaking and user speaks loud enough, cancel assistant speech
+            if getattr(self.call, "is_speaking", False) and energy >= config.LIVE_BARGE_IN_THRESHOLD:
+                self.call.cancel.set()
+                self.call.source.clear()
+                self.call.cancel = threading.Event()
+                log.info("Barge-in: interrupted assistant speech due to voice input from %s", user.display_name)
+
+            user_id = user.id
+            with self._lock:
+                if user_id not in self.buffers:
+                    self.buffers[user_id] = {
+                        "pcm": bytearray(),
+                        "speech_detected": False,
+                        "speech_start_time": 0.0,
+                        "last_speech_time": 0.0,
+                        "user": user,
+                    }
+                buf = self.buffers[user_id]
+                buf["user"] = user
+
+            if energy >= config.VAD_ENERGY_THRESHOLD:
+                with self._lock:
+                    if not buf["speech_detected"]:
+                        buf["speech_detected"] = True
+                        buf["speech_start_time"] = now
+                    buf["last_speech_time"] = now
+                    buf["pcm"].extend(pcm)
+            elif buf["speech_detected"]:
+                with self._lock:
+                    buf["pcm"].extend(pcm)
+                    silence_ms = (now - buf["last_speech_time"]) * 1000.0
+                    speech_ms = (buf["last_speech_time"] - buf["speech_start_time"]) * 1000.0
+                    if silence_ms >= config.VAD_TRAILING_SILENCE_MS:
+                        if speech_ms >= config.VAD_MIN_SPEECH_MS:
+                            raw_pcm = bytes(buf["pcm"])
+                            buf["pcm"].clear()
+                            buf["speech_detected"] = False
+                            buf["speech_start_time"] = 0.0
+                            buf["last_speech_time"] = 0.0
+                            pcm16k = from_discord_pcm(raw_pcm)
+                            if pcm16k:
+                                asyncio.run_coroutine_threadsafe(
+                                    self._process_utterance(user, pcm16k),
+                                    self.loop,
+                                )
+                        else:
+                            buf["pcm"].clear()
+                            buf["speech_detected"] = False
+
+        async def _process_utterance(self, user: discord.Member | discord.User, pcm16k: bytes) -> None:
+            try:
+                from runtime.models import REGISTRY
+                if REGISTRY.is_ready("stt"):
+                    stt_engine = REGISTRY.get("stt")
+                else:
+                    from .stt import get_stt
+                    stt_engine = get_stt()
+
+                text = await asyncio.to_thread(stt_engine.transcribe, pcm16k)
+                if not text or not text.strip():
+                    return
+                log.info("Transcribed voice from %s in guild %s: '%s'", user.display_name, self.call.guild_id, text)
+                await self.bot.respond_to_voice_utterance(
+                    self.call.guild_id, user, self.call.text_channel_id, text.strip()
+                )
+            except Exception as e:
+                log.exception("Error processing Discord voice utterance from %s: %s", user.display_name, e)
+
+        def cleanup(self) -> None:
+            with self._lock:
+                self.buffers.clear()
+else:
+    class DiscordVoiceAudioSink:  # type: ignore[no-redef]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
 
 
 class DiscordVoiceManager:
@@ -129,7 +272,15 @@ class DiscordVoiceManager:
             await self.leave_call(guild_id)
 
         try:
-            vc = await target_channel.connect()
+            if _VOICE_RECV_AVAILABLE and voice_recv is not None:
+                try:
+                    vc = await target_channel.connect(cls=voice_recv.VoiceRecvClient)
+                except Exception as err:
+                    log.warning("VoiceRecvClient connect failed (%s); falling back to VoiceClient", err)
+                    vc = await target_channel.connect()
+            else:
+                vc = await target_channel.connect()
+
             source = QueuePCMSource()
             vc.play(source)
 
@@ -142,8 +293,20 @@ class DiscordVoiceManager:
             with self._lock:
                 self.calls[guild_id] = call
 
+            # Attach receive sink if voice_recv is available
+            if _VOICE_RECV_AVAILABLE and voice_recv is not None and isinstance(vc, voice_recv.VoiceRecvClient):
+                try:
+                    import discord_bot
+                    raw_sink = DiscordVoiceAudioSink(call, discord_bot.bot, asyncio.get_running_loop(), self)
+                    sink = voice_recv.SilenceGeneratorSink(raw_sink)
+                    vc.listen(sink)
+                    call.sink = sink
+                    log.info("Attached Discord voice receive sink on channel %s", target_channel.name)
+                except Exception as err:
+                    log.warning("Could not attach voice receive sink: %s", err)
+
             log.info("Joined voice channel %s in guild %s", target_channel.name, guild_id)
-            return True, f"Joined **{target_channel.name}**. I'll speak responses in voice here!"
+            return True, f"Joined **{target_channel.name}**. I'm listening and speaking in voice!"
         except Exception as e:
             err_msg = str(e)
             log.exception("Failed to connect to Discord voice: %s", e)
@@ -165,6 +328,10 @@ class DiscordVoiceManager:
         call.cancel.set()
         call.source.clear()
         try:
+            if hasattr(call.voice_client, "is_listening") and call.voice_client.is_listening():
+                call.voice_client.stop_listening()
+            if hasattr(call.voice_client, "is_playing") and call.voice_client.is_playing():
+                call.voice_client.stop()
             if call.voice_client.is_connected():
                 await call.voice_client.disconnect(force=True)
         except Exception as e:
@@ -232,20 +399,24 @@ class DiscordVoiceManager:
         if not tts_engine.available:
             return
 
-        for chunk in chunk_list:
-            if call.cancel.is_set():
-                break
-            try:
-                audio = await asyncio.to_thread(
-                    tts_engine.synthesize, chunk, call.cancel
-                )
-                if audio is None or len(audio) == 0 or call.cancel.is_set():
+        call.is_speaking = True
+        try:
+            for chunk in chunk_list:
+                if call.cancel.is_set():
                     break
-                pcm_bytes = to_discord_pcm(audio)
-                call.source.feed(pcm_bytes)
-            except Exception as e:
-                log.exception("Error synthesizing Discord speech chunk: %s", e)
-                break
+                try:
+                    audio = await asyncio.to_thread(
+                        tts_engine.synthesize, chunk, call.cancel
+                    )
+                    if audio is None or len(audio) == 0 or call.cancel.is_set():
+                        break
+                    pcm_bytes = to_discord_pcm(audio)
+                    call.source.feed(pcm_bytes)
+                except Exception as e:
+                    log.exception("Error synthesizing Discord speech chunk: %s", e)
+                    break
+        finally:
+            call.is_speaking = False
 
 
 _DISCORD_VOICE_MANAGER: DiscordVoiceManager | None = None

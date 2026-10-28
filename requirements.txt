@@ -8,6 +8,7 @@ fastapi
 uvicorn[standard]
 sentence-transformers
 discord.py[voice]
+discord-ext-voice-recv
 apscheduler
 rapidfuzz
 dateparser

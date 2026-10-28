@@ -289,6 +289,98 @@ class SpideyBot(commands.Bot):
                     voice_mgr.speak_text(message.guild.id, message.author.id, response)
                 )
 
+    async def respond_to_voice_utterance(
+        self,
+        guild_id: int,
+        user: discord.User | discord.Member,
+        text_channel_id: int,
+        prompt: str,
+    ) -> None:
+        """Process an utterance heard in Discord voice, replying in text and voice."""
+        prompt = prompt.strip()
+        if not prompt:
+            return
+
+        text_channel = self.get_channel(text_channel_id)
+        if text_channel is not None and isinstance(text_channel, (discord.TextChannel, discord.Thread)):
+            try:
+                await text_channel.send(f"🎙️ **{user.display_name}**: {prompt}")
+            except Exception as e:
+                LOGGER.warning("Could not post user voice transcript to text channel: %s", e)
+
+        chat = app.memory_store.get_or_create_external_chat(
+            DISCORD_PROVIDER, str(user.id)
+        )
+        chat_id = chat["id"]
+        self.track_chat(chat_id, str(user.id))
+
+        try:
+            command = await asyncio.to_thread(
+                app._handle_local_command, prompt, chat_id
+            )
+        except ValueError as error:
+            if text_channel is not None:
+                await text_channel.send(str(error))
+            return
+        except Exception:
+            LOGGER.exception("Discord voice command handling failed.")
+            if text_channel is not None:
+                await text_channel.send("Something went wrong handling that command.")
+            return
+
+        if command is not None:
+            response, provider = command
+            LOGGER.info("Voice answered locally with %s.", provider)
+            app.memory_store.add_message(chat_id, "user", prompt)
+            app.memory_store.add_message(chat_id, "assistant", response)
+            if text_channel is not None:
+                for chunk in _split_response(response):
+                    await text_channel.send(chunk)
+            voice_mgr = get_discord_voice_manager()
+            if voice_mgr.is_call_active(guild_id):
+                asyncio.create_task(
+                    voice_mgr.speak_text(guild_id, user.id, response)
+                )
+            return
+
+        app.memory_store.add_message(chat_id, "user", prompt)
+        try:
+            from contextlib import nullcontext
+            typing_ctx = text_channel.typing() if text_channel is not None else nullcontext()
+            async with typing_ctx:
+                await asyncio.to_thread(app.ensure_model_loaded)
+                context = app.memory_store.build_context(
+                    chat_id, app.tokenizer, prompt
+                )
+                memories = app._memories_for_prompt(prompt)
+                response = await asyncio.to_thread(
+                    app.generate_response,
+                    prompt,
+                    app._token_budget(prompt),
+                    context,
+                    memories,
+                )
+        except ValueError as error:
+            if text_channel is not None:
+                await text_channel.send(str(error))
+            return
+        except Exception:
+            LOGGER.exception("Discord voice generation failed.")
+            if text_channel is not None:
+                await text_channel.send("I could not generate a response right now.")
+            return
+
+        response = _clean_reply_text(response)
+        app.memory_store.add_message(chat_id, "assistant", response)
+        if text_channel is not None:
+            for chunk in _split_response(response):
+                await text_channel.send(chunk)
+        voice_mgr = get_discord_voice_manager()
+        if voice_mgr.is_call_active(guild_id):
+            asyncio.create_task(
+                voice_mgr.speak_text(guild_id, user.id, response)
+            )
+
 
 bot = SpideyBot()
 
