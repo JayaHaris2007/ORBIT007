@@ -100,6 +100,12 @@ class SpideyBot(commands.Bot):
         for chat in app.memory_store.list_external_chats(DISCORD_PROVIDER):
             self.track_chat(chat["id"], str(chat["external_user_id"]))
         app._restore_reminders(provider=DISCORD_PROVIDER)
+        ready = app.init_learning_module(DISCORD_PROVIDER)
+        LOGGER.info(
+            "Learning module %s; Discord weekly nudge %s.",
+            "initialized" if ready else "NOT available",
+            "scheduled" if ready else "not scheduled",
+        )
         asyncio.create_task(self.deliver_notifications())
         LOGGER.info(
             "Discord command registry initialized; tracking %d chat(s).",
@@ -131,18 +137,29 @@ class SpideyBot(commands.Bot):
                     )
                     continue
                 for notification in notifications:
-                    self.last_notification_id[chat_id] = notification["id"]
                     content = notification["content"].strip()
                     if not content:
+                        self.last_notification_id[chat_id] = notification["id"]
                         continue
                     try:
                         await self.send_dm(int(external_user_id), content)
+                        self.last_notification_id[chat_id] = notification["id"]
                         LOGGER.info(
                             "Delivered notification %s to user %s.",
                             notification["id"],
                             external_user_id,
                         )
+                        try:
+                            await asyncio.to_thread(
+                                app.memory_store.add_message,
+                                chat_id,
+                                "assistant",
+                                content,
+                            )
+                        except Exception:
+                            pass
                     except discord.Forbidden:
+                        self.last_notification_id[chat_id] = notification["id"]
                         LOGGER.warning(
                             "Cannot DM notification %s to user %s; DMs are closed.",
                             notification["id"],

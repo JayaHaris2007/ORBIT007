@@ -1,0 +1,73 @@
+[
+    {
+        "name": "Java & DSA",
+        "category": "technical",
+        "description": "Core Java through data structures and algorithms, the classic path to problem-solving interviews.",
+        "topics": [
+            {"name": "Java Basics", "aliases": ["java syntax", "core java"], "description": "Variables, loops, methods, and basic I/O.", "priority": 3},
+            {"name": "Object-Oriented Programming", "aliases": ["oop", "classes and objects"], "description": "Classes, inheritance, polymorphism, encapsulation, abstraction.", "priority": 3, "requires": ["Java Basics"]},
+            {"name": "Strings and Arrays", "aliases": ["arrays", "string handling"], "description": "Working with strings and arrays in Java.", "priority": 3, "requires": ["Java Basics"]},
+            {"name": "Collections Framework", "aliases": ["collections", "lists and maps"], "description": "List, Set, Map, and their common implementations.", "priority": 3, "requires": ["Java Basics"]},
+            {"name": "Exception Handling", "aliases": ["exceptions", "try catch"], "description": "Checked vs unchecked exceptions, try-with-resources.", "priority": 2, "requires": ["Object-Oriented Programming"]},
+            {"name": "Generics", "aliases": ["generics"], "description": "Type-safe containers and generic methods.", "priority": 2, "requires": ["Object-Oriented Programming"]},
+            {"name": "File I/O", "aliases": ["file handling", "io streams"], "description": "Reading and writing files with NIO and streams.", "priority": 1, "requires": ["Java Basics"]},
+            {"name": "Multithreading", "aliases": ["threads", "concurrency"], "description": "Threads, executors, synchronization, and race conditions.", "priority": 2, "requires": ["Java Basics", "Exception Handling"]},
+            {"name": "Big O Notation", "aliases": ["time complexity", "complexity analysis"], "description": "Analyzing time and space complexity of algorithms.", "priority": 3},
+            {"name": "Arrays and Hashing", "aliases": ["array algorithms", "hash maps"], "description": "Hash tables and the classic array problem patterns.", "priority": 3, "requires": ["Big O Notation", "Collections Framework"]},
+            {"name": "Two Pointers and Sliding Window", "aliases": ["two pointers", "sliding window"], "description": "Linear-scan patterns for subarray and pair problems.", "priority": 3, "requires": ["Arrays and Hashing"]},
+            {"name": "Stacks and Queues", "aliases": ["stack", "queue"], "description": "LIFO and FIFO structures and their problem patterns.", "priority": 2, "requires": ["Big O Notation"]},
+            {"name": "Linked Lists", "aliases": ["linked list", "list problems"], "description": "Singly and doubly linked lists, fast and slow pointers.", "priority": 2, "requires": ["Big O Notation"]},
+            {"name": "Recursion", "aliases": ["recursion", "backtracking basics"], "description": "Thinking recursively and drawing the call stack.", "priority": 3, "requires": ["Big O Notation"]},
+            {"name": "Trees", "aliases": ["binary trees", "bst"], "description": "Binary trees, BSTs, and depth-first traversals.", "priority": 3, "requires": ["Recursion"]},
+            {"name": "Graphs", "aliases": ["graph algorithms", "bfs dfs"], "description": "Graph representations, BFS, DFS, and shortest paths.", "priority": 3, "requires": ["Trees", "Stacks and Queues"]},
+            {"name": "Dynamic Programming", "aliases": ["dp", "memoization"], "description": "Breaking problems into overlapping subproblems.", "priority": 2, "requires": ["Recursion", "Two Pointers and Sliding Window"]},
+            {"name": "Sorting and Searching", "aliases": ["sort algorithms", "binary search"], "description": "Merge sort, quick sort, and binary search variants.", "priority": 2, "requires": ["Big O Notation"]}
+        ]
+    },
+    {
+        "name": "Web Development",
+        "category": "technical",
+        "description": "Frontend to backend: the full path from HTML to deployed full-stack apps.",
+        "topics": [
+            {"name": "HTML Fundamentals", "aliases": ["html"], "description": "Semantic markup, forms, and accessibility basics.", "priority": 3},
+            {"name": "CSS Basics", "aliases": ["css", "styling"], "description": "Selectors, the box model, and the cascade.", "priority": 3, "requires": ["HTML Fundamentals"]},
+            {"name": "Responsive Design", "aliases": ["flexbox", "grid", "media queries"], "description": "Flexbox, CSS grid, and mobile-first layouts.", "priority": 3, "requires": ["CSS Basics"]},
+            {"name": "JavaScript Fundamentals", "aliases": ["js basics", "javascript"], "description": "Types, functions, closures, and the event loop.", "priority": 3},
+            {"name": "DOM Manipulation", "aliases": ["dom"], "description": "Querying and mutating the document tree.", "priority": 2, "requires": ["JavaScript Fundamentals"]},
+            {"name": "ES6 and Modern JavaScript", "aliases": ["es6", "modern js"], "description": "Arrow functions, destructuring, modules, async/await.", "priority": 3, "requires": ["JavaScript Fundamentals"]},
+            {"name": "Node.js Basics", "aliases": ["node", "nodejs"], "description": "The runtime, npm scripts, and server-side JS.", "priority": 3, "requires": ["JavaScript Fundamentals"]},
+            {"name": "Express.js", "aliases": ["express"], "description": "Routes, middleware, and handlers.", "priority": 3, "requires": ["Node.js Basics"]},
+            {"name": "REST APIs", "aliases": ["api design", "rest"], "description": "Designing and consuming HTTP APIs.", "priority": 3, "requires": ["Express.js"]},
+            {"name": "Databases with SQL", "aliases": ["sql", "mysql"], "description": "Schema design and CRUD queries.", "priority": 3},
+            {"name": "MongoDB", "aliases": ["mongodb", "nosql"], "description": "Documents, collections, and aggregation.", "priority": 2},
+            {"name": "React Fundamentals", "aliases": ["react", "components"], "description": "Components, props, and JSX.", "priority": 3, "requires": ["JavaScript Fundamentals"]},
+            {"name": "React Hooks and State", "aliases": ["react hooks", "state"], "description": "useState, useEffect, and data flow.", "priority": 3, "requires": ["React Fundamentals"]},
+            {"name": "State Management", "aliases": ["context", "redux"], "description": "Shared state across component trees.", "priority": 2, "requires": ["React Hooks and State"]},
+            {"name": "Authentication", "aliases": ["auth", "jwt"], "description": "Sessions, JWTs, and protected routes.", "priority": 2, "requires": ["REST APIs"]},
+            {"name": "Deployment and Git", "aliases": ["git", "deploy"], "description": "Version control, hosting, and CI basics.", "priority": 2, "requires": ["React Fundamentals", "Express.js"]}
+        ]
+    },
+    {
+        "name": "DBMS",
+        "category": "academic",
+        "description": "Database theory and practice, aligned with a typical DBMS syllabus.",
+        "topics": [
+            {"name": "Database Fundamentals", "aliases": ["db basics", "dbms intro"], "description": "What a DBMS is, schemas, and data models.", "priority": 3},
+            {"name": "Relational Model", "aliases": ["relations", "keys"], "description": "Relations, keys, and integrity constraints.", "priority": 3, "requires": ["Database Fundamentals"]},
+            {"name": "ER Diagrams", "aliases": ["er model", "entity relationship"], "description": "Entities, relationships, and ER-to-relational mapping.", "priority": 3, "requires": ["Database Fundamentals"]},
+            {"name": "SQL Queries", "aliases": ["sql", "select"], "description": "DDL and DML with SELECT, INSERT, UPDATE, DELETE.", "priority": 3, "requires": ["Relational Model"]},
+            {"name": "Joins and Subqueries", "aliases": ["joins", "subqueries"], "description": "Inner, outer, and self joins; nested queries.", "priority": 3, "requires": ["SQL Queries"]},
+            {"name": "Functional Dependencies", "aliases": ["fds", "dependencies"], "description": "Determining FDs and computing closures.", "priority": 2, "requires": ["Relational Model"]},
+            {"name": "Normalization", "aliases": ["normal forms", "1nf 2nf 3nf bcnf"], "description": "1NF through BCNF and decomposition.", "priority": 3, "requires": ["Functional Dependencies"]},
+            {"name": "Indexing", "aliases": ["indexes", "b+ tree"], "description": "B+ trees, hash indexes, and index trade-offs.", "priority": 2, "requires": ["SQL Queries"]},
+            {"name": "Transactions", "aliases": ["acid", "transaction management"], "description": "ACID properties and transaction states.", "priority": 3, "requires": ["Database Fundamentals"]},
+            {"name": "Concurrency Control", "aliases": ["locking", "serializability"], "description": "Locks, timestamps, and serializable schedules.", "priority": 2, "requires": ["Transactions"]},
+            {"name": "Recovery and Logging", "aliases": ["recovery", "logging"], "description": "Undo/redo logging and crash recovery.", "priority": 2, "requires": ["Transactions"]},
+            {"name": "Query Optimization", "aliases": ["optimization", "query plans"], "description": "Cost-based optimization and query plans.", "priority": 2, "requires": ["Indexing", "Joins and Subqueries"]},
+            {"name": "Stored Procedures and Triggers", "aliases": ["procedures", "triggers"], "description": "Server-side routines and event-driven actions.", "priority": 1, "requires": ["SQL Queries"]},
+            {"name": "NoSQL Overview", "aliases": ["nosql", "cap theorem"], "description": "Document, key-value, and column stores; CAP.", "priority": 2, "requires": ["Database Fundamentals"]},
+            {"name": "Database Design Project", "aliases": ["db project", "mini project"], "description": "Design and implement a small application database.", "priority": 1, "requires": ["ER Diagrams", "Normalization"]},
+            {"name": "Advanced Topics", "aliases": ["sharding", "replication"], "description": "Replication, sharding, and distributed databases.", "priority": 1, "requires": ["NoSQL Overview"]}
+        ]
+    }
+]

@@ -22,6 +22,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
 import dateparser
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -40,6 +41,11 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from memory import LOCAL_TIMEZONE, MAX_RETRIEVED_MEMORIES, MemoryStore
+from learning import roadmaps as learning_roadmaps, schema as learning_schema
+from learning import classifier as learning_classifier
+from learning import nudges as learning_nudges
+from learning import progress as learning_progress
+from learning.router import router as learning_router
 from research.router import router as research_router
 from research.search_engine import (
     SearchFailed,
@@ -224,6 +230,9 @@ DEFAULT_SYSTEM_PROMPT = (
     "technical co-pilot, and companion in learning and development. Help him "
     "think clearly, build better projects, solve problems, and get things done. "
 
+    "You cannot create, complete, or delete tasks, habits, or reminders "
+    "yourself. Only the application can. Never say you did. "
+
     "Answer in English unless Jaya requests another language."
 )
 
@@ -349,6 +358,7 @@ def _schedule_reminder(reminder: dict[str, Any]) -> None:
     now = datetime.now(run_at.tzinfo)
     if run_at <= now:
         if now - run_at > timedelta(minutes=30):
+            memory_store.cancel_reminder(reminder["id"])
             return
         print(f"Delivering missed reminder {reminder['id']}.")
         run_at = now + timedelta(seconds=5)
@@ -401,10 +411,34 @@ def _parse_reminder_time(value: str) -> datetime | None:
     settings = {
         "TIMEZONE": "Asia/Kolkata",
         "RETURN_AS_TIMEZONE_AWARE": True,
-        "PREFER_DATES_FROM": "future",
     }
     if not day_part_match:
-        return dateparser.parse(value, settings=settings)
+        parsed_base = dateparser.parse(value, settings=settings)
+        if parsed_base is None:
+            return None
+        now = datetime.now(parsed_base.tzinfo)
+        has_explicit_date = bool(
+            re.search(
+                r"\b(tomorrow|tmrw|today|tonight|next|monday|tuesday|wednesday|thursday|friday|saturday|sunday|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{1,2}[/-]\d{1,2})\b",
+                value,
+                re.IGNORECASE,
+            )
+        )
+        if not has_explicit_date and parsed_base <= now:
+            # If the user specified a time that passed recently today (within 4 hours),
+            # don't silently bump to tomorrow. Alert the user so they catch typos (like 20:03 for 21:03).
+            if now - parsed_base <= timedelta(hours=4):
+                time_str = parsed_base.strftime("%I:%M %p").lstrip("0")
+                next_hint = (now + timedelta(minutes=5)).strftime("%H:%M")
+                raise ValueError(
+                    f"'{value}' ({time_str}) has already passed today. "
+                    f"If you want this reminder tomorrow, say 'tomorrow at {value}', "
+                    f"or specify a future time tonight (e.g. 'in 5 minutes' or 'at {next_hint}')."
+                )
+            parsed_base += timedelta(days=1)
+        elif parsed_base <= now and not has_explicit_date:
+            parsed_base += timedelta(days=1)
+        return parsed_base
 
     day_part = day_part_match.group(1).lower()
     date_text = re.sub(
@@ -415,7 +449,8 @@ def _parse_reminder_time(value: str) -> datetime | None:
         date_text = "tomorrow"
     if not date_text:
         date_text = "today"
-    parsed_date = dateparser.parse(date_text, settings=settings)
+    settings_with_future = {**settings, "PREFER_DATES_FROM": "future"}
+    parsed_date = dateparser.parse(date_text, settings=settings_with_future)
     if parsed_date is None:
         return None
     hour, minute = day_part_times[day_part]
@@ -942,27 +977,27 @@ def _is_habit_follow_up(prompt: str, previous_messages: list[dict[str, str]]) ->
 
 
 def _parse_chat_habit(prompt: str) -> tuple[str, str] | None:
-    normalized_prompt = re.sub(r"\s+", " ", prompt.strip()).rstrip(".!?")
+    normalized_prompt = _normalize_command(prompt)
+    if _is_advice_question(normalized_prompt.lower()):
+        return None
     match = re.fullmatch(
-        r"(?:hey\s+(?:spidey|s\.p\.i\.d\.e\.y)[,\s]+)?(?:please\s+)?(?:add|create|start|track)\s+"
-        r"(?:(?:a|an)\s+)?(?:new\s+)?(?:daily\s+)?habit"
-        r"(?:\s+(?:for|to|called|named|of))?\s+(.+)",
+        r"(?:add|create|start|track|set(?:\s+up)?|make|new)\s+"
+        r"(?:(?:a|an)\s+)?(?:new\s+)?(?:daily\s+)?habits?\b"
+        r"(?:\s+(?:for|to|called|named|of))?\s*[:\-]?\s*(.+)",
         normalized_prompt,
         re.IGNORECASE,
     )
     if not match:
         return None
-    habit_name = match.group(1).strip()
-    if not habit_name:
-        return None
-    return habit_name, "Activity"
+    habit_name = match.group(1).strip(" :-'\"")
+    return (habit_name, "Activity") if habit_name else None
 
 
 def _parse_habit_completion(prompt: str) -> str | None:
     """Match an explicit 'complete habit <name>' command."""
     match = re.fullmatch(
         r"(?:complete|finish|done\s+with|mark\s+done|check\s+off)\s+"
-        r"(?:(?:the|my)\s+)?habit\s+(.+)",
+        r"(?:(?:the|my)\s+)?habits?\s+(.+)",
         _normalize_command(prompt),
         re.IGNORECASE,
     )
@@ -1015,7 +1050,7 @@ def _parse_task_completion(prompt: str) -> str | None:
     """Match an explicit 'complete task <number|title>' command."""
     match = re.fullmatch(
         r"(?:complete|completed|finish|finished|mark\s+done|check\s+off)\s+"
-        r"(?:(?:the|my)\s+)?task\s+(.+)",
+        r"(?:(?:the|my)\s+)?tasks?\s+(.+)",
         _normalize_command(prompt),
         re.IGNORECASE,
     )
@@ -1028,13 +1063,20 @@ _COMPLETION_VERB_PATTERN = (
     r"(?:complete|completed|finish|finished|mark\s+done|check\s+off|done\s+with)"
 )
 
+_ACTION_WITHOUT_HANDLER = re.compile(
+    r"^(?:add|create|new|set|make|mark|complete|finish|delete|remove|"
+    r"rename|reschedule|cancel)\b.*\b(?:tasks?|habits?|reminders?)\b",
+    re.IGNORECASE,
+)
+
 
 def _parse_completion_target(prompt: str) -> str | None:
     """Catch generic 'complete X' phrasing without an entity keyword."""
     normalized = _normalize_command(prompt)
     patterns = (
         rf"{_COMPLETION_VERB_PATTERN}\s+(.+)",
-        r"mark\s+(.+?)\s+as\s+(?:being\s+)?(?:completed|done|finished)",
+        r"mark\s+(?:the\s+|my\s+)?(.+?)\s+(?:tasks?\s+|habits?\s+)?(?:as\s+)?"
+        r"(?:being\s+)?(?:completed|complete|done|finished)",
         r"(?:i\s+)?(?:have\s+)?(?:completed|finished)\s+(.+)",
         r"(.+?)\s+task\s+(?:completed|complete|finished|finish)"
         r"(?:\s+(?:and\s+)?mark\s+it(?:\s+as)?(?:\s+completed)?)?",
@@ -1183,6 +1225,108 @@ def _notify_completion(chat_id: str, prefix: str, content: str) -> None:
     memory_store.add_notification(chat_id, f"{prefix}-{uuid.uuid4()}", content)
 
 
+def _learning_suggest_for_task(task_id: int) -> None:
+    """Background hook: propose topic links for a freshly created task."""
+    if not learning_schema.is_initialized():
+        return
+    try:
+        learning_classifier.suggest_links_for_task(
+            task_id,
+            embed=memory_store.embed,
+            llm=_fallback_llm_for_learning,
+        )
+    except Exception as error:  # pragma: no cover - defensive
+        print(f"Learning link suggestion skipped: {error}")
+
+
+def _fallback_llm_for_learning(title: str, topics) -> str | None:
+    """Ask the local model to name the best topic; skip when not loaded."""
+    if model is None or tokenizer is None:
+        return None
+    numbered = "\n".join(
+        f"{index}. {topic['name']}" for index, topic in enumerate(topics, 1)
+    )
+    prompt = (
+        "Pick the single learning topic from the list below that best "
+        "matches this task title. Reply with only the exact topic name, "
+        "or the word none if nothing fits. No explanation."
+        f"\n\nTask title: {title}\n\nTopics:\n{numbered}"
+    )
+    try:
+        reply = generate_response(prompt, 16)
+    except Exception as error:  # pragma: no cover - defensive
+        print(f"Learning LLM fallback skipped: {error}")
+        return None
+    return reply or None
+
+
+def _learning_on_task_completed(task_id: int) -> None:
+    """Background hook: apply the completion rule to confirmed topic links."""
+    if not learning_schema.is_initialized():
+        return
+    try:
+        learning_progress.on_task_completed_links(task_id)
+    except Exception as error:  # pragma: no cover - defensive
+        print(f"Learning completion rule skipped: {error}")
+
+
+def _run_learning_hook(job) -> None:
+    """Run a learning-module job off the request path so it can never block
+    or break task creation and completion."""
+    threading.Thread(target=job, daemon=True).start()
+
+
+WEEKLY_LEARNING_NUDGE_JOB = "weekly-learning-nudge"
+
+
+def _weekly_learning_nudge(provider: str = "local") -> None:
+    """Monday-morning recap for one provider's chats, at most weekly each."""
+    if not learning_schema.is_initialized():
+        return
+    try:
+        if provider == "discord":
+            chat_ids = [
+                chat["id"] for chat in memory_store.list_external_chats("discord")
+            ]
+        else:
+            chat_ids = memory_store.list_local_chat_ids()
+        learning_nudges.deliver_weekly_nudge(
+            chat_ids,
+            memory_store.add_notification,
+            recently_sent=memory_store.has_recent_weekly_nudge,
+        )
+    except Exception as error:  # pragma: no cover - defensive
+        print(f"Weekly learning nudge skipped: {error}")
+
+
+def _schedule_weekly_learning_nudge(provider: str = "local") -> None:
+    if not learning_schema.is_initialized():
+        return
+    try:
+        reminder_scheduler.add_job(
+            _weekly_learning_nudge,
+            CronTrigger(day_of_week="mon", hour=9, minute=0,
+                        timezone="Asia/Kolkata"),
+            args=[provider],
+            id=f"{WEEKLY_LEARNING_NUDGE_JOB}-{provider}",
+            replace_existing=True,
+        )
+    except Exception as error:  # pragma: no cover - defensive
+        print(f"Weekly learning nudge not scheduled: {error}")
+
+
+def init_learning_module(provider: str = "local") -> bool:
+    """Idempotent. Safe to call from both the web server and the Discord bot."""
+    try:
+        learning_schema.init(DATABASE_PATH)
+        learning_roadmaps.load_seeds()
+        _schedule_weekly_learning_nudge(provider)
+        return learning_schema.is_initialized()
+    except Exception as error:  # pragma: no cover - defensive
+        print(f"Learning module init skipped: {error}")
+        return False
+
+
 def _task_completion_line(task: dict[str, Any], name: str = "") -> str:
     """Encouraging reply that names the next task, if one is waiting."""
     # list_tasks already orders by priority, so the first row is the best next pick.
@@ -1219,7 +1363,28 @@ def _complete_task(task: dict[str, Any], name: str = "") -> str:
     updated = memory_store.update_task(task["id"], completed=True)
     if updated is None:
         raise ValueError(f"Task {task['id']} was not found.")
-    return _task_completion_line(updated, name=name)
+    _run_learning_hook(lambda: _learning_on_task_completed(task["id"]))
+    reply = _task_completion_line(updated, name=name)
+    if learning_schema.is_initialized():
+        try:
+            with learning_schema.connect() as connection:
+                row = connection.execute(
+                    "SELECT t.id, t.name FROM task_topic_links AS link "
+                    "JOIN topics AS t ON t.id = link.topic_id "
+                    "WHERE link.task_id = ? AND link.state = 'confirmed' "
+                    "LIMIT 1",
+                    (task["id"],),
+                ).fetchone()
+            if row:
+                topic_id = row["id"]
+                topic_name = row["name"]
+                links = learning_progress.list_confirmed_task_links(topic_id)
+                total = len(links)
+                completed = sum(1 for link in links if link.get("task_completed"))
+                reply = f"{reply.rstrip()}\nThat counts toward {topic_name}, now {completed}/{total}."
+        except Exception:
+            pass
+    return reply
 
 
 def _complete_habit(habit: dict[str, Any], name: str = "") -> str:
@@ -1628,7 +1793,7 @@ def _greeting_answer(prompt: str) -> str | None:
     salutation = f"Hey {name.split()[0]}!" if name else "Hey!"
     return (
         f"{salutation} I'm S.P.I.D.E.Y. Ask me about your tasks, habits, "
-        "reminders, or anything you've saved."
+        "reminders, learning progress, or anything you've saved."
     )
 
 
@@ -1648,6 +1813,7 @@ _PAGE_BY_PROVIDER = {
     "local-habit-manager": "habits",
     "local-task-manager": "tasks",
     "local-scheduler": "reminders",
+    "local-learning": "learning",
 }
 
 _PAGE_ALIASES = {
@@ -1687,6 +1853,252 @@ def _page_for_provider(provider: str) -> str | None:
     if provider.startswith("local-navigate:"):
         return provider.split(":", 1)[1]
     return _PAGE_BY_PROVIDER.get(provider)
+
+
+_LEARNING_PROGRESS_PATTERN = re.compile(
+    r"^(?:(?:show|check|view)\s+(?:me\s+)?)?(?:my\s+)?learning\s+"
+    r"(?:progress|status|stats|summary)$"
+    r"|^learning\s+(?:progress|status)$"
+    r"|^how(?:'s| is)\s+my\s+learning\s+(?:going|progress)$",
+    re.IGNORECASE,
+)
+
+_LEARNING_NEXT_PATTERN = re.compile(
+    r"^what(?:\s+should|\s+can|\s+do)?\s+i\s+(?:learn|study|tackle)\s+next$"
+    r"|^what(?:'s| is)\s+next\s+(?:to\s+)?(?:learn|study)$"
+    r"|^(?:what(?:'s| is)\s+)?my\s+next\s+(?:topic|lesson)$"
+    r"|^next\s+topics?$",
+    re.IGNORECASE,
+)
+
+_LEARNING_ROADMAP_PROGRESS_PATTERN = re.compile(
+    r"^(?:check|show|view)\s+(?:me\s+)?(?:my\s+)?(?:the\s+)?"
+    r"(?:(?:status|progress)\s+(?:of|for|in)\s+(.+)"
+    r"|(.+?)\s+(?:status|progress))$"
+    r"|^what(?:'s| is)\s+(?:my\s+)?(?:the\s+)?"
+    r"(?:status|progress)\s+(?:of|for|in)\s+(.+)$"
+    r"|^how(?:'s| is)\s+(?:my\s+)?(.+?)\s+(?:going|progress)$",
+    re.IGNORECASE,
+)
+
+_LEARNING_ROADMAP_NEXT_PATTERN = re.compile(
+    r"^(?:check\s+)?what\s+"
+    r"(?:(?:to\s+)?should\s+i|i\s+should|can\s+i|to)\s+"
+    r"(?:learn|study)(?:\s+next)?\s+(?:from|in|on)\s+(.+)$",
+    re.IGNORECASE,
+)
+
+_LEARNING_ROADMAP_TASK_PATTERN = re.compile(
+    r"^(?:suggest|recommend)(?:\s+me)?\s+(?:a\s+)?"
+    r"(?:task|topic|something)\s+"
+    r"(?:(?:to\s+)?(?:learn|study)(?:\s+next)?\s+(?:from|in|on)\s+(.+)"
+    r"|(?:for|about)\s+(.+))$",
+    re.IGNORECASE,
+)
+
+_LEARNING_START_PATTERN = re.compile(
+    r"^(?:start|begin)\s+(?:learning|studying)\s+(.+)$",
+    re.IGNORECASE,
+)
+
+_LEARNING_COMPLETE_PATTERN = re.compile(
+    r"^(?:complete|finish)\s+(?:the\s+)?(?:topic|learning\s+topic)\s+(.+)$"
+    r"|^mark\s+(.+?)\s+as\s+(?:learned|mastered)$",
+    re.IGNORECASE,
+)
+
+_LEARNING_FINISHED_PATTERN = re.compile(
+    r"^i(?:'ve|'d| have| had| was| am|'m)?\s+"
+    r"(?:just\s+|already\s+|finally\s+)?"
+    r"(?:comp\w*|finis\w*ed|finis\w*ht|finish|learn(?:ed|t)|master\w*|done\s+with)\s+"
+    r"(?:learning\s+|the\s+topic\s+|with\s+)?(.+)$",
+    re.IGNORECASE,
+)
+
+
+def _clean_topic_reference(reference: str) -> str:
+    """Drop a trailing 'mark it done/complete…' clause from a spoken topic.
+
+    Users often tack an instruction onto the confession, e.g. "i had completed
+    HTML Fundamentals mark it done". The topic name is everything before that.
+    """
+    return re.sub(
+        r"\s+(?:and\s+)?mark\s+\S.*$", "", reference, flags=re.IGNORECASE
+    ).strip()
+
+
+def _learning_progress_reply() -> tuple[str, str]:
+    summary = learning_progress.overall_progress()
+    if summary["topic_count"] == 0:
+        return (
+            "Your learning tracker is empty. Open the Learning page to add a "
+            "roadmap, then I can coach you through it.",
+            "local-learning",
+        )
+    lines = [
+        f"- **{item['roadmap_name']}**: {item['completed']}/{item['total']} "
+        f"({item['percent']}%)"
+        for item in summary["per_roadmap"]
+    ]
+    return (
+        f"You've completed **{summary['completed_topics']} of "
+        f"{summary['topic_count']}** topics "
+        f"({summary['completion_percent']}%) across "
+        f"{summary['roadmap_count']} roadmaps.\n"
+        + "\n".join(lines)
+        + "\n\nSay 'what should I learn next' for a suggestion.",
+        "local-learning",
+    )
+
+
+def _learning_roadmap_progress_reply(reference: str) -> tuple[str, str]:
+    roadmap = learning_progress.find_roadmap(reference)
+    if roadmap is None:
+        return _learning_unknown_roadmap_reply(reference)
+    reply = (
+        f"**{roadmap['name']}**: you've completed "
+        f"**{roadmap['completed_count']} of {roadmap['topic_count']}** topics "
+        f"({roadmap['completion_percent']}%), with "
+        f"{roadmap['in_progress_count']} in progress."
+    )
+    if roadmap["next_topic"]:
+        reply += f" Next up: **{roadmap['next_topic']}**."
+    else:
+        reply += " There's nothing unlocked left to learn in this roadmap."
+    return reply, "local-learning"
+
+
+def _learning_unknown_roadmap_reply(reference: str) -> tuple[str, str]:
+    names = ", ".join(
+        item["name"] for item in learning_progress.roadmap_summaries()
+    )
+    reply = f"I couldn't find a learning roadmap named **{reference}**."
+    if names:
+        reply += f" Your roadmaps are: {names}."
+    return reply, "local-learning"
+
+
+def _learning_next_reply(
+    roadmap_reference: str | None = None, *, suggest_task: bool = False
+) -> tuple[str, str]:
+    roadmap = None
+    if roadmap_reference:
+        roadmap = learning_progress.find_roadmap(roadmap_reference)
+        if roadmap is None:
+            return _learning_unknown_roadmap_reply(roadmap_reference)
+    items = learning_progress.next_topics(
+        limit=3, roadmap_id=roadmap["id"] if roadmap else None
+    )
+    if not items:
+        scope = f" in {roadmap['name']}" if roadmap else ""
+        return (
+            f"Everything that's unlocked{scope} is already completed — add a "
+            "new topic or roadmap when you're ready.",
+            "local-learning",
+        )
+    if suggest_task:
+        first = items[0]
+        return (
+            f"Try this task for **{first['roadmap_name']}**: "
+            f"**Practice {first['name']}**. {first['reason']} "
+            f"Say 'start learning {first['name']}' when you begin.",
+            "local-learning",
+        )
+    lines = [
+        f"- **{item['name']}** ({item['roadmap_name']}) — {item['reason']}"
+        for item in items
+    ]
+    header = "Here's what's ready to learn"
+    if roadmap:
+        header += f" in **{roadmap['name']}**"
+    return (
+        header + ":\n"
+        + "\n".join(lines)
+        + "\n\nSay 'start learning <topic>' when you begin one.",
+        "local-learning",
+    )
+
+
+def _learning_start_reply(reference: str, name: str = "") -> tuple[str, str]:
+    topic = learning_progress.find_topic(_clean_topic_reference(reference))
+    if topic is None:
+        raise ValueError(f"No topic matched '{reference}'.")
+    if topic["status"] == "completed":
+        return (
+            f"**{topic['name']}** is already completed — say 'reopen "
+            f"learning {topic['name']}' only if you really want to redo it.",
+            "local-learning",
+        )
+    if topic["status"] == "learning":
+        return (
+            f"**{topic['name']}** is already in progress. Keep going!"
+            + (f" {name.split()[0]}, you've got this." if name else ""),
+            "local-learning",
+        )
+    unmet = learning_progress.unavailable_prerequisite_names(topic["id"])
+    if unmet:
+        return (
+            f"**{topic['name']}** isn't unlocked yet — finish "
+            f"{', '.join(unmet)} first.",
+            "local-learning",
+        )
+    learning_progress.set_topic_status(topic["id"], "learning")
+    return (
+        f"Marked **{topic['name']}** as in progress. I'll keep it at the "
+        f"top of your next-topic list.",
+        "local-learning",
+    )
+
+
+def _learning_complete_reply(reference: str, name: str = "") -> tuple[str, str]:
+    topic = learning_progress.find_topic(_clean_topic_reference(reference))
+    if topic is None:
+        raise ValueError(f"No topic matched '{reference}'.")
+    if topic["status"] == "completed":
+        return (
+            f"**{topic['name']}** was already marked completed.",
+            "local-learning",
+        )
+    learning_progress.set_topic_status(topic["id"], "completed")
+    return (
+        f"Nice work — **{topic['name']}** is marked completed"
+        + (f", {name.split()[0]}" if name else "")
+        + ". Say 'what should I learn next' to keep rolling.",
+        "local-learning",
+    )
+
+
+def _learning_command(prompt: str, name: str = "") -> tuple[str, str] | None:
+    """Handle learning tracker commands; requires the schema to be ready."""
+    if not learning_schema.is_initialized():
+        return None
+    normalized = _normalize_command(prompt)
+    if _LEARNING_PROGRESS_PATTERN.fullmatch(normalized):
+        return _learning_progress_reply()
+    if _LEARNING_NEXT_PATTERN.fullmatch(normalized):
+        return _learning_next_reply()
+    match = _LEARNING_ROADMAP_PROGRESS_PATTERN.fullmatch(normalized)
+    if match:
+        reference = next(group for group in match.groups() if group)
+        return _learning_roadmap_progress_reply(reference.strip())
+    match = _LEARNING_ROADMAP_TASK_PATTERN.fullmatch(normalized)
+    if match:
+        reference = next(group for group in match.groups() if group)
+        return _learning_next_reply(reference.strip(), suggest_task=True)
+    match = _LEARNING_ROADMAP_NEXT_PATTERN.fullmatch(normalized)
+    if match:
+        return _learning_next_reply(match.group(1).strip())
+    match = _LEARNING_START_PATTERN.fullmatch(normalized)
+    if match:
+        return _learning_start_reply(match.group(1).strip(), name=name)
+    match = _LEARNING_COMPLETE_PATTERN.fullmatch(normalized)
+    if match:
+        reference = next(group for group in match.groups() if group)
+        return _learning_complete_reply(reference.strip(), name=name)
+    match = _LEARNING_FINISHED_PATTERN.fullmatch(normalized)
+    if match:
+        return _learning_complete_reply(match.group(1).strip(), name=name)
+    return None
 
 
 def _handle_local_command(prompt: str, chat_id: str) -> tuple[str, str] | None:
@@ -1785,6 +2197,7 @@ def _handle_local_command(prompt: str, chat_id: str) -> tuple[str, str] | None:
     if task_request:
         title, priority = task_request
         task = memory_store.create_task(title, priority)
+        _run_learning_hook(lambda: _learning_suggest_for_task(task["id"]))
         open_count = len(memory_store.list_tasks(include_completed=False))
         return (
             assistant_tone.task_created(
@@ -1978,12 +2391,25 @@ def _handle_local_command(prompt: str, chat_id: str) -> tuple[str, str] | None:
         completed_task = _find_task_reference(completion_target)
         if completed_task is not None:
             return (_complete_task(completed_task, name=name), "local-task-manager")
-        return None
+        # No task or habit matched — let learning commands have a look.
+
+    learning_command = _learning_command(prompt, name=name)
+    if learning_command is not None:
+        return learning_command
 
     web_query = _parse_web_search_query(prompt)
     if web_query:
         return _web_search_reply(web_query)
 
+    normalized = _normalize_command(prompt)
+    if _ACTION_WITHOUT_HANDLER.search(normalized) and not _is_advice_question(
+        normalized.lower()
+    ):
+        return (
+            "I couldn't parse that as a command, so nothing was changed. "
+            "Try 'add habit exercise' or 'complete task explore AI basics'.",
+            "local-help",
+        )
     return None
 
 
@@ -2024,10 +2450,11 @@ def resolve_short_follow_up(
 
 
 def _productivity_context(prompt: str) -> str:
-    """Current habits/tasks, injected only when the question is about them."""
+    """Current habits/tasks/learning, injected when the question is about them."""
     if not re.search(
         r"\b(?:habits?|tasks?|to[\s-]?dos?|routine|schedule|productiv\w*|"
-        r"improve\w*|discipline|goals?)\b",
+        r"improve\w*|discipline|goals?|learning|studying|study|topics?|course\w*|"
+        r"skills?|practice)\b",
         prompt,
         re.IGNORECASE,
     ):
@@ -2046,7 +2473,36 @@ def _productivity_context(prompt: str) -> str:
     if tasks:
         lines.append("Pending tasks:")
         lines.extend(f"- {t['title']} ({t['priority']})" for t in tasks[:8])
+    lines.extend(_learning_digest())
     return "\n".join(lines)
+
+
+def _learning_digest() -> list[str]:
+    """Short learning snapshot for the LLM, or nothing when not initialized."""
+    if not learning_schema.is_initialized():
+        return []
+    try:
+        overview = learning_progress.overall_progress()
+    except Exception:  # pragma: no cover - defensive
+        return []
+    if overview["topic_count"] == 0:
+        return []
+    digest = [
+        "Learning progress: "
+        f"{overview['completed_topics']} of {overview['topic_count']} "
+        f"topics completed ({overview['completion_percent']}%), "
+        f"{overview['in_progress_topics']} in progress."
+    ]
+    upcoming = learning_progress.next_topics(limit=3)
+    if upcoming:
+        digest.append(
+            "Next learning topics: "
+            + ", ".join(
+                f"{topic['name']} ({topic['roadmap_name']})" for topic in upcoming
+            )
+            + "."
+        )
+    return digest
 
 
 def _trim_incomplete(text: str) -> str:
@@ -2161,6 +2617,9 @@ def generate_response(
 async def lifespan(_: FastAPI):
     await asyncio.to_thread(ensure_model_loaded)
     _restore_reminders(provider="local")
+    # Learning tracker tables and starter roadmaps are additive and idempotent.
+    # Never let a learning-module problem prevent the assistant from booting.
+    init_learning_module("local")
     try:
         yield
     finally:
@@ -2204,6 +2663,8 @@ async def handle_http_error(request: Request, error: HTTPException):
 
 # Web research lives in its own package; this is the only wiring app.py needs.
 app.include_router(research_router)
+# Adaptive learning tracker: tables, seeds, and its API surface.
+app.include_router(learning_router)
 
 
 @app.get("/health")
@@ -2380,12 +2841,14 @@ def create_task(payload: dict[str, Any] = Body(...)):
     if not isinstance(payload, dict) or not isinstance(payload.get("title"), str):
         raise HTTPException(400, "'title' must be a string.")
     try:
-        return JSONResponse(status_code=201, content=memory_store.create_task(
+        task = memory_store.create_task(
             payload["title"],
             payload.get("priority", "medium"),
             payload.get("due_at"),
             payload.get("description", ""),
-        ))
+        )
+        _run_learning_hook(lambda: _learning_suggest_for_task(task["id"]))
+        return JSONResponse(status_code=201, content=task)
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
 
@@ -2422,6 +2885,7 @@ def update_task(task_id: int, payload: dict[str, Any] = Body(...)):
             "task-coach",
             _task_completion_line(task, name=_user_name(_user_fact_memories())),
         )
+        _run_learning_hook(lambda: _learning_on_task_completed(task_id))
     return task
 
 

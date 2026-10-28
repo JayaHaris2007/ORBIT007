@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom';
-import { Home, CheckSquare, ListTodo, Bell, BarChart2, Settings, Flame } from 'lucide-react';
+import { Home, CheckSquare, ListTodo, Bell, BarChart2, Settings, Flame, GraduationCap } from 'lucide-react';
 
 const Navbar = () => {
     const location = useLocation();
@@ -8,6 +8,7 @@ const Navbar = () => {
         { path: '/habits', icon: CheckSquare, label: 'Habits' },
         { path: '/todos', icon: ListTodo, label: 'Tasks' },
         { path: '/reminders', icon: Bell, label: 'Reminders & Memory' },
+        { path: '/learning', icon: GraduationCap, label: 'Learning' },
         { path: '/analytics', icon: BarChart2, label: 'Analytics' },
         { path: '/settings', icon: Settings, label: 'Settings' },
     ];

@@ -301,6 +301,16 @@ class MemoryStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_local_chat_ids(self) -> list[str]:
+        """Conversation ids belonging to local web sessions."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT c.id FROM conversations AS c "
+                "LEFT JOIN external_sessions AS s ON s.conversation_id = c.id "
+                "WHERE s.provider IS NULL"
+            ).fetchall()
+        return [row["id"] for row in rows]
+
     def list_tasks(self, include_completed: bool = False) -> list[dict[str, Any]]:
         query = "SELECT * FROM tasks"
         if not include_completed:
@@ -650,6 +660,21 @@ class MemoryStore:
             row = connection.execute(
                 "SELECT 1 FROM notifications WHERE chat_id = ? "
                 "AND reminder_id LIKE 'task-coach-%' AND created_at > ? LIMIT 1",
+                (chat_id, cutoff),
+            ).fetchone()
+        return row is not None
+
+    def has_recent_weekly_nudge(
+        self, chat_id: str, now: datetime | None = None, days: int = 6
+    ) -> bool:
+        """Return True if a weekly learning nudge landed in the last ``days``."""
+        now = now or datetime.now(timezone.utc)
+        cutoff = (now - timedelta(days=days)).isoformat()
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM notifications WHERE chat_id = ? "
+                "AND reminder_id LIKE 'weekly-learning-nudge-%' "
+                "AND created_at > ? LIMIT 1",
                 (chat_id, cutoff),
             ).fetchone()
         return row is not None

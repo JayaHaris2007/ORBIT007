@@ -61,6 +61,7 @@ const AssistantSidebar = () => {
             tasks: '/todos',
             reminders: '/reminders',
             memories: '/reminders',
+            learning: '/learning',
             settings: '/settings',
         };
         const route = routes[page];

@@ -8,6 +8,8 @@ import Todos from './pages/Todos';
 import Analytics from './pages/Analytics';
 import Settings from './pages/Settings';
 import RemindersMemory from './pages/RemindersMemory';
+import Learning from './pages/Learning';
+import ErrorBoundary from './components/ErrorBoundary';
 import AssistantSidebar from './components/AssistantSidebar';
 
 const AppLayout = ({ children }) => {
@@ -35,6 +37,7 @@ function App() {
                         <Route path="/habits" element={<AppLayout><Habits /></AppLayout>} />
                         <Route path="/todos" element={<AppLayout><Todos /></AppLayout>} />
                         <Route path="/reminders" element={<AppLayout><RemindersMemory /></AppLayout>} />
+                        <Route path="/learning" element={<AppLayout><ErrorBoundary><Learning /></ErrorBoundary></AppLayout>} />
                         <Route path="/analytics" element={<AppLayout><Analytics /></AppLayout>} />
                         <Route path="/settings" element={<AppLayout><Settings /></AppLayout>} />
                         <Route path="*" element={<Navigate to="/dashboard" replace />} />

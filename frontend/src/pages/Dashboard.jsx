@@ -12,6 +12,7 @@ import AnimeQuote from '../components/AnimeQuote';
 import ConfirmationModal from '../components/ConfirmationModal';
 import HabitWidget from '../components/HabitWidget';
 import TodoWidget from '../components/TodoWidget';
+import LearningWidget from '../components/LearningWidget';
 import TaskEditor from '../components/TaskEditor';
 
 const Dashboard = () => {
@@ -250,6 +251,7 @@ const Dashboard = () => {
                         onToggle={(id) => handleToggleTask(id, true)}
                         onEdit={setEditingTask}
                     />
+                    <LearningWidget />
                 </div>
             </section>
 
