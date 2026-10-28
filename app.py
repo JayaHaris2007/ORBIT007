@@ -3192,6 +3192,13 @@ def parse_arguments() -> argparse.Namespace:
 def main() -> None:
     args = parse_arguments()
     if args.server:
+        from runtime.guard import SPIDEY_MODEL_GUARD_PORT, get_port_owner_pid
+        owner_pid = get_port_owner_pid(args.port) or get_port_owner_pid(SPIDEY_MODEL_GUARD_PORT)
+        if owner_pid is not None and owner_pid != os.getpid():
+            print(f"\n[FATAL] S.P.I.D.E.Y server or models are already running in process [PID {owner_pid}].")
+            print(f"To stop the previous instance, run: taskkill /PID {owner_pid} /F (or Stop-Process -Id {owner_pid})\n")
+            return
+
         uvicorn.run(
             "app:app" if args.reload else app,
             host=args.host,
