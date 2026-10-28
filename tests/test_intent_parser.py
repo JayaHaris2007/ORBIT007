@@ -346,3 +346,143 @@ def test_conversational_queries_fall_through(chat_id, prompt):
     # These must NOT be trapped by the deterministic parser; they should return None so Qwen answers them.
     result = app._handle_local_command(prompt, chat_id)
     assert result is None, f"Query '{prompt}' was mistakenly handled by deterministic provider {result}"
+
+
+# -------------------------------------------------------------------------
+# 9. CONTEXTUAL PRONOUNS, BARE KEYWORDS, & NATURAL DISCORD LOG REGRESSIONS
+# -------------------------------------------------------------------------
+
+@pytest.mark.parametrize("prompt", ["habits", "my habits", "habits today", "pending habits"])
+def test_bare_habit_keywords(chat_id, temp_db, prompt):
+    temp_db.create_habit("Sleeping")
+    result = app._handle_local_command(prompt, chat_id)
+    assert result is not None
+    assert result[1] == "local-habit-manager"
+    assert "Sleeping" in result[0]
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    ["tasks", "todos", "my tasks", "what task are pending", "what are the task need to complete"],
+)
+def test_bare_task_keywords(chat_id, temp_db, prompt):
+    temp_db.create_task("explore AI Basics", priority="medium")
+    result = app._handle_local_command(prompt, chat_id)
+    assert result is not None
+    assert result[1] == "local-task-manager"
+    assert "explore AI Basics" in result[0]
+
+
+def test_conversational_habit_completion_from_discord_log(chat_id, temp_db):
+    habit = temp_db.create_habit("Sleeping")
+    result = app._handle_local_command("Now I am completed sleeping", chat_id)
+    assert result is not None
+    reply, provider = result
+    assert provider == "local-habit-manager"
+    updated = temp_db.list_habits()[0]
+    assert len(updated["completed_dates"]) == 1
+
+
+def test_contextual_pronoun_task_completion_from_discord_log(chat_id, temp_db):
+    task = temp_db.create_task("explore AI Basics", priority="medium")
+    # Simulate the prior turn from Discord log
+    list_res = app._handle_local_command("What task are pending", chat_id)
+    assert list_res is not None
+    temp_db.add_message(chat_id, "user", "What task are pending")
+    temp_db.add_message(chat_id, "assistant", list_res[0])
+
+    # Now user says "Mark it completed"
+    comp_res = app._handle_local_command("Mark it completed", chat_id)
+    assert comp_res is not None
+    reply, provider = comp_res
+    assert provider == "local-task-manager"
+    updated = temp_db.list_tasks(include_completed=True)[0]
+    assert updated["id"] == task["id"]
+    assert updated["completed"] == 1
+
+
+def test_fuzzy_habit_completion_typo(chat_id, temp_db):
+    temp_db.create_habit("watering garder")
+    result = app._handle_local_command("mark watering garden done", chat_id)
+    assert result is not None
+    assert result[1] == "local-habit-manager"
+    assert len(temp_db.list_habits()[0]["completed_dates"]) == 1
+
+
+def test_web_search_suffix_parsing():
+    assert (
+        app._parse_web_search_query("What are latest news in India web search")
+        == "latest news in India"
+    )
+    assert (
+        app._parse_web_search_query("Search for latest news in india")
+        == "latest news in india"
+    )
+
+
+def test_notes_and_memory_local_commands(chat_id, temp_db):
+    add_res = app._handle_local_command("add note: buy groceries", chat_id)
+    assert add_res is not None
+    assert add_res[1] == "local-memory"
+    assert "buy groceries" in add_res[0]
+
+    list_res = app._handle_local_command("show my notes", chat_id)
+    assert list_res is not None
+    assert list_res[1] == "local-memory"
+    assert "buy groceries" in list_res[0]
+
+
+def test_daily_briefing_and_xp_status(chat_id, temp_db):
+    temp_db.create_task("Write unit tests", priority="high")
+    temp_db.create_habit("Morning Run")
+    brief = app._handle_local_command("what's on my plate", chat_id)
+    assert brief is not None
+    assert brief[1] == "local-briefing"
+    assert "Write unit tests" in brief[0]
+    assert "Morning Run" in brief[0]
+
+    xp_res = app._handle_local_command("my xp", chat_id)
+    assert xp_res is not None
+    assert xp_res[1] == "local-gamification"
+    assert "Level" in xp_res[0]
+
+
+def test_contextual_priority_undo_and_delete(chat_id, temp_db):
+    task = temp_db.create_task("Ship release", priority="medium")
+    list_res = app._handle_local_command("tasks", chat_id)
+    temp_db.add_message(chat_id, "user", "tasks")
+    temp_db.add_message(chat_id, "assistant", list_res[0])
+
+    prio_res = app._handle_local_command("make it high priority", chat_id)
+    assert prio_res is not None
+    assert prio_res[1] == "local-task-manager"
+    assert temp_db.list_tasks(include_completed=True)[0]["priority"] == "high"
+
+    comp_res = app._handle_local_command("mark it completed", chat_id)
+    assert comp_res is not None
+    assert temp_db.list_tasks(include_completed=True)[0]["completed"] == 1
+
+    undo_res = app._handle_local_command("reopen it", chat_id)
+    assert undo_res is not None
+    assert temp_db.list_tasks(include_completed=True)[0]["completed"] == 0
+
+    del_res = app._handle_local_command("delete it", chat_id)
+    assert del_res is not None
+    assert len(temp_db.list_tasks(include_completed=True)) == 0
+
+
+def test_batch_habit_completion_and_uncomplete(chat_id, temp_db):
+    temp_db.create_habit("Watering Garden")
+    temp_db.create_habit("Sleeping")
+    batch_res = app._handle_local_command("complete all habits", chat_id)
+    assert batch_res is not None
+    assert batch_res[1] == "local-habit-manager"
+    assert all(len(h["completed_dates"]) == 1 for h in temp_db.list_habits())
+
+    undo_res = app._handle_local_command("uncheck habit Sleeping", chat_id)
+    assert undo_res is not None
+    assert undo_res[1] == "local-habit-manager"
+    sleeping = next(h for h in temp_db.list_habits() if h["name"] == "Sleeping")
+    assert len(sleeping["completed_dates"]) == 0
+
+

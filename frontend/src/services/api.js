@@ -1,4 +1,5 @@
-const API_BASE_URL = (import.meta.env.VITE_SPIDEY_API_BASE_URL || 'http://127.0.0.1:8000').replace(/\/$/, '');
+const defaultBase = typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1:8000';
+const API_BASE_URL = (import.meta.env.VITE_SPIDEY_API_BASE_URL || defaultBase).replace(/\/$/, '');
 
 export const apiRequest = async (path, options = {}) => {
     const response = await fetch(`${API_BASE_URL}${path}`, {

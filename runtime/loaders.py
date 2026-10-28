@@ -113,12 +113,12 @@ def load_qwen_eager(
     return model, tokenizer, load_time
 
 
-def load_omnivoice_eager() -> tuple[Any, float]:
+def load_omnivoice_eager(generation_lock: Any | None = None) -> tuple[Any, float]:
     """Load OmniVoice once, warm up with one short synthesis, and register."""
     from voice.tts import OmniVoiceEngine
 
     t0 = time.perf_counter()
-    engine = OmniVoiceEngine()
+    engine = OmniVoiceEngine(shared_lock=generation_lock)
     engine._load_eager()
 
     if not engine.available:
@@ -193,7 +193,7 @@ def load_all_models_eager(
 
     # 2. OmniVoice TTS
     try:
-        tts_engine, load_time = load_omnivoice_eager()
+        tts_engine, load_time = load_omnivoice_eager(generation_lock=generation_lock)
         REGISTRY.register("tts", tts_engine, metrics={"load_time": load_time})
     except Exception as err:
         log.exception("Eager load failed for OmniVoice TTS: %s", err)

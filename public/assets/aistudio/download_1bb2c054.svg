@@ -1,0 +1,154 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2218.3764999999994 1038.6" width="2218.3764999999994" height="1038.6" style="--bg:#18181B;--fg:#F4F4F5;--line:#71717A;--muted:#A1A1AA;--surface:#27272A;--border:#3F3F46;background:var(--bg)">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap');
+  text { font-family: 'Inter', system-ui, sans-serif; }
+  svg {
+    /* Derived from --bg and --fg (overridable via --line, --accent, etc.) */
+    --_text:          var(--fg);
+    --_text-sec:      var(--muted, color-mix(in srgb, var(--fg) 60%, var(--bg)));
+    --_text-muted:    var(--muted, color-mix(in srgb, var(--fg) 40%, var(--bg)));
+    --_text-faint:    color-mix(in srgb, var(--fg) 25%, var(--bg));
+    --_line:          var(--line, color-mix(in srgb, var(--fg) 50%, var(--bg)));
+    --_arrow:         var(--accent, color-mix(in srgb, var(--fg) 85%, var(--bg)));
+    --_node-fill:     var(--surface, color-mix(in srgb, var(--fg) 3%, var(--bg)));
+    --_node-stroke:   var(--border, color-mix(in srgb, var(--fg) 20%, var(--bg)));
+    --_group-fill:    var(--bg);
+    --_group-hdr:     color-mix(in srgb, var(--fg) 5%, var(--bg));
+    --_inner-stroke:  color-mix(in srgb, var(--fg) 12%, var(--bg));
+    --_key-badge:     color-mix(in srgb, var(--fg) 10%, var(--bg));
+  }
+</style>
+<defs>
+  <marker id="arrowhead" markerWidth="8" markerHeight="5" refX="7" refY="2.5" orient="auto">
+    <polygon points="0 0, 8 2.5, 0 5" fill="var(--_arrow)" stroke="var(--_arrow)" stroke-width="0.75" stroke-linejoin="round" />
+  </marker>
+  <marker id="arrowhead-start" markerWidth="8" markerHeight="5" refX="1" refY="2.5" orient="auto-start-reverse">
+    <polygon points="8 0, 0 2.5, 8 5" fill="var(--_arrow)" stroke="var(--_arrow)" stroke-width="0.75" stroke-linejoin="round" />
+  </marker>
+</defs>
+<g class="subgraph" data-id="Clients" data-label="Client Interfaces">
+  <rect x="1277.6194999999996" y="40" width="900.757" height="96.9" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <rect x="1277.6194999999996" y="40" width="900.757" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <text x="1289.6194999999996" y="54" font-size="12" font-weight="600" fill="var(--_text-sec)" dy="4.199999999999999">Client Interfaces</text>
+</g>
+<g class="subgraph" data-id="ServerProcess" data-label="Single FastAPI Server Process (app.py)">
+  <rect x="40" y="265.20000000000005" width="1833.7849999999996" height="733.4" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <rect x="40" y="265.20000000000005" width="1833.7849999999996" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <text x="52" y="279.20000000000005" font-size="12" font-weight="600" fill="var(--_text-sec)" dy="4.199999999999999">Single FastAPI Server Process (app.py)</text>
+<g class="subgraph" data-id="Engine" data-label="Runtime &amp; Central Model Registry (runtime/models.py)">
+  <rect x="289.48900000000003" y="394.1" width="1337.5019999999997" height="96.9" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <rect x="289.48900000000003" y="394.1" width="1337.5019999999997" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <text x="301.48900000000003" y="408.1" font-size="12" font-weight="600" fill="var(--_text-sec)" dy="4.199999999999999">Runtime &amp; Central Model Registry (runtime/models.py)</text>
+</g>
+<g class="subgraph" data-id="CoreLogic" data-label="Core Application Modules">
+  <rect x="56" y="545" width="1229.799" height="181.8" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <rect x="56" y="545" width="1229.799" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <text x="68" y="559" font-size="12" font-weight="600" fill="var(--_text-sec)" dy="4.199999999999999">Core Application Modules</text>
+</g>
+<g class="subgraph" data-id="Storage" data-label="Persistence Layer">
+  <rect x="693.7406666666666" y="871.7" width="253.27199999999996" height="110.9" rx="0" ry="0" fill="var(--_group-fill)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <rect x="693.7406666666666" y="871.7" width="253.27199999999996" height="28" rx="0" ry="0" fill="var(--_group-hdr)" stroke="var(--_node-stroke)" stroke-width="1" />
+  <text x="705.7406666666666" y="885.7" font-size="12" font-weight="600" fill="var(--_text-sec)" dy="4.199999999999999">Persistence Layer</text>
+</g>
+</g>
+<polyline class="edge" data-from="UI" data-to="FastAPI" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="REST API" points="1420.5574999999994,120.9 1420.5574999999994,178.9 1002.7138124999999,178.9 1002.7138124999999,247.20000000000002 584.8701249999999,247.20000000000002 584.8701249999999,309.20000000000005" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="WS" data-to="VoicePipeline" data-style="solid" data-arrow-start="true" data-arrow-end="true" data-label="Full-Duplex PCM" points="2015.4314999999995,120.9 2015.4314999999995,202.9 1936.1082499999998,202.9 1936.1082499999998,247.20000000000002 1856.7849999999996,247.20000000000002 1856.7849999999996,515 1169.6126666666664,515 1169.6126666666664,589" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" marker-start="url(#arrowhead-start)" />
+<polyline class="edge" data-from="DC" data-to="DiscordBot" data-style="solid" data-arrow-start="true" data-arrow-end="true" data-label="Gateway &amp; RTP Voice" points="1707.9909999999995,120.9 1707.9909999999998,309.20000000000005" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" marker-start="url(#arrowhead-start)" />
+<polyline class="edge" data-from="DiscordBot" data-to="VoicePipeline" data-style="solid" data-arrow-start="true" data-arrow-end="true" data-label="Audio Sink &amp; Source" points="1667.9909999999998,80.9 1667.9909999999995,237.8 1029.4263333333333,237.8 1029.4263333333333,323.79999999999995" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" marker-start="url(#arrowhead-start)" />
+<polyline class="edge" data-from="FastAPI" data-to="Intent" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="584.8701249999999,346.1 584.8701249999999,382.1 771.5819999999999,382.1 771.5819999999999,589" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="FastAPI" data-to="Memory" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="584.8701249999999,346.1 584.8701249999999,382.1 912.9659999999999,382.1 912.9659999999999,673.9" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="FastAPI" data-to="Engine" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="611.8588749999999,80.9 611.8588749999999,92.9 918.2399999999999,92.9 918.2399999999999,128.9" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Intent" data-to="Scheduler" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="771.5819999999999,625.9 771.5819999999999,649.9 727.7873333333331,649.9 727.7873333333331,780.8000000000001" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Engine" data-to="Memory" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="918.2399999999999,225.8 918.2399999999999,372.69999999999993 950.5139999999999,372.69999999999993 950.5139999999999,408.69999999999993" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Memory" data-to="DB" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="912.9659999999999,710.8 912.9659999999999,866.7 820.3766666666666,866.7 820.3766666666666,915.7" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Scheduler" data-to="DB" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="727.7873333333331,817.7 727.7873333333331,866.7 820.3766666666666,866.7 820.3766666666666,915.7" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="Intent" data-to="Memory" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="771.5819999999999,625.9 771.5819999999999,649.9 912.9659999999999,649.9 912.9659999999999,673.9" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<g class="edge-label" data-from="UI" data-to="FastAPI" data-label="REST API">
+  <rect x="970.2138124999999" y="185.9" width="64.57600000000001" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="1002.5018124999999" y="201.05" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">REST API</text>
+</g>
+<g class="edge-label" data-from="WS" data-to="VoicePipeline" data-label="Full-Duplex PCM">
+  <rect x="1887.6082499999998" y="209.9" width="96.65200000000002" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="1935.9342499999998" y="225.05" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">Full-Duplex PCM</text>
+</g>
+<g class="edge-label" data-from="DC" data-to="DiscordBot" data-label="Gateway &amp; RTP Voice">
+  <rect x="1648.4909999999995" y="185.9" width="118.036" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="1707.5089999999996" y="201.05" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">Gateway &amp; RTP Voice</text>
+</g>
+<g class="edge-label" data-from="DiscordBot" data-to="VoicePipeline" data-label="Audio Sink &amp; Source">
+  <rect x="1610.9909999999995" y="162.20000000000002" width="113.28400000000002" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="1667.6329999999996" y="177.35000000000002" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">Audio Sink &amp; Source</text>
+</g>
+<g class="node" data-id="UI" data-label="React Web Frontend (Vite + Tailwind)" data-shape="rectangle">
+  <rect x="1293.6194999999996" y="84" width="253.87599999999995" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="1420.5574999999994" y="102.45" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">React Web Frontend (Vite + Tailwind)</text>
+</g>
+<g class="node" data-id="WS" data-label="Browser WebSocket /ws/voice (Live Mode)" data-shape="rectangle">
+  <rect x="1868.4864999999995" y="84" width="293.89" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="2015.4314999999995" y="102.45" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Browser WebSocket /ws/voice (Live Mode)</text>
+</g>
+<g class="node" data-id="DC" data-label="Discord Client (Voice &amp; Text Channels)" data-shape="rectangle">
+  <rect x="1575.4954999999995" y="84" width="264.991" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="1707.9909999999995" y="102.45" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Discord Client (Voice &amp; Text Channels)</text>
+</g>
+<g class="node" data-id="Guard" data-label="Process Guard (Port 47654 Lock)" data-shape="rectangle">
+  <rect x="182.35462499999994" y="309.20000000000005" width="240.53799999999998" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="302.62362499999995" y="327.65000000000003" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Process Guard (Port 47654 Lock)</text>
+</g>
+<g class="node" data-id="FastAPI" data-label="FastAPI HTTP &amp; WebSocket Endpoints" data-shape="rectangle">
+  <rect x="450.89262499999995" y="309.20000000000005" width="267.9549999999999" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="584.8701249999999" y="327.65000000000003" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">FastAPI HTTP &amp; WebSocket Endpoints</text>
+</g>
+<g class="node" data-id="Scheduler" data-label="APScheduler (Reminders &amp; Nudges)" data-shape="rectangle">
+  <rect x="601.2198333333331" y="780.8000000000001" width="253.13499999999996" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="727.7873333333331" y="799.2500000000001" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">APScheduler (Reminders &amp; Nudges)</text>
+</g>
+<g class="node" data-id="DiscordBot" data-label="In-Process Discord Bot (discord_bot.py)" data-shape="rectangle">
+  <rect x="1569.1969999999997" y="309.20000000000005" width="277.58799999999997" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="1707.9909999999995" y="327.65000000000003" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">In-Process Discord Bot (discord_bot.py)</text>
+</g>
+<g class="node" data-id="LLM" data-label="Qwen3-4B (4-bit NF4 via BitsAndBytes on CUDA)" data-shape="rectangle">
+  <rect x="617.005" y="438.1" width="320.566" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="777.288" y="456.55" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Qwen3-4B (4-bit NF4 via BitsAndBytes on CUDA)</text>
+</g>
+<g class="node" data-id="TTS" data-label="OmniVoice Engine (float16 on CUDA / CPU fallback)" data-shape="rectangle">
+  <rect x="965.5709999999999" y="438.1" width="329.4579999999999" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="1130.3" y="456.55" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">OmniVoice Engine (float16 on CUDA / CPU fallback)</text>
+</g>
+<g class="node" data-id="Embedder" data-label="SentenceTransformer (all-MiniLM-L6-v2)" data-shape="rectangle">
+  <rect x="305.48900000000003" y="438.1" width="283.51599999999996" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="447.247" y="456.55" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">SentenceTransformer (all-MiniLM-L6-v2)</text>
+</g>
+<g class="node" data-id="STT" data-label="SpeechRecognition / Whisper ASR Engine" data-shape="rectangle">
+  <rect x="1323.0289999999998" y="438.1" width="287.962" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="1467.0099999999998" y="456.55" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">SpeechRecognition / Whisper ASR Engine</text>
+</g>
+<g class="node" data-id="Intent" data-label="Deterministic Intent Parser &amp; Handlers" data-shape="rectangle">
+  <rect x="640.1979999999999" y="589" width="262.76800000000003" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="771.5819999999999" y="607.45" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Deterministic Intent Parser &amp; Handlers</text>
+</g>
+<g class="node" data-id="Memory" data-label="Memory Store &amp; Semantic Context (memory.py)" data-shape="rectangle">
+  <rect x="757.8699999999999" y="673.9" width="310.19199999999995" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="912.9659999999999" y="692.35" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Memory Store &amp; Semantic Context (memory.py)</text>
+</g>
+<g class="node" data-id="VoicePipeline" data-label="Voice Session &amp; Streaming Manager (voice/)" data-shape="rectangle">
+  <rect x="969.2399999999999" y="589" width="300.55899999999997" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="1119.5194999999999" y="607.45" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Voice Session &amp; Streaming Manager (voice/)</text>
+</g>
+<g class="node" data-id="Learning" data-label="Learning &amp; Roadmap Engine (learning/)" data-shape="rectangle">
+  <rect x="72" y="589" width="269.43699999999995" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="206.71849999999998" y="607.45" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Learning &amp; Roadmap Engine (learning/)</text>
+</g>
+<g class="node" data-id="Research" data-label="Web Research Engine (research/)" data-shape="rectangle">
+  <rect x="369.4369999999999" y="589" width="242.76100000000002" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="490.8174999999999" y="607.45" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Web Research Engine (research/)</text>
+</g>
+<g class="node" data-id="DB" data-label="SQLite Database (assistant.db)" data-shape="cylinder">
+  <rect x="709.7406666666666" y="922.7" width="221.27199999999996" height="36.900000000000006" fill="var(--_node-fill)" stroke="none" />
+  <line x1="709.7406666666666" y1="922.7" x2="709.7406666666666" y2="959.6" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <line x1="931.0126666666665" y1="922.7" x2="931.0126666666665" y2="959.6" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <ellipse cx="820.3766666666666" cy="959.6" rx="110.63599999999998" ry="7" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <ellipse cx="820.3766666666666" cy="922.7" rx="110.63599999999998" ry="7" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="820.3766666666666" y="941.1500000000001" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">SQLite Database (assistant.db)</text>
+</g>
+</svg>

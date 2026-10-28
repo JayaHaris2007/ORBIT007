@@ -1,6 +1,8 @@
 import os
+import sys
 import argparse
 import asyncio
+import difflib
 import re
 import threading
 import time
@@ -10,6 +12,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+
+# Ensure `import app` inside discord_bot.py shares this exact module instance when run as __main__
+sys.modules.setdefault("app", sys.modules[__name__])
 
 # Filter benign pydub warning about missing system ffmpeg
 warnings.filterwarnings("ignore", category=RuntimeWarning, module="pydub.utils")
@@ -358,10 +363,16 @@ def _recommend_next_task(
 
 
 def _schedule_reminder(reminder: dict[str, Any]) -> None:
-    run_at = dateparser.parse(
-        reminder["run_at"],
-        settings={"RETURN_AS_TIMEZONE_AWARE": True, "TIMEZONE": "Asia/Kolkata"},
-    )
+    run_at: datetime | None = None
+    try:
+        run_at = datetime.fromisoformat(reminder["run_at"])
+        if run_at.tzinfo is None:
+            run_at = run_at.replace(tzinfo=LOCAL_TIMEZONE)
+    except (TypeError, ValueError):
+        run_at = dateparser.parse(
+            reminder["run_at"],
+            settings={"RETURN_AS_TIMEZONE_AWARE": True, "TIMEZONE": "Asia/Kolkata"},
+        )
     if run_at is None:
         print(f"Skipping reminder {reminder['id']}: invalid run time.")
         return
@@ -427,6 +438,26 @@ def _restore_reminders(provider: str = "local") -> None:
 
 
 def _parse_reminder_time(value: str) -> datetime | None:
+    rel_match = re.fullmatch(
+        r"in\s+(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)",
+        value.strip(),
+        re.IGNORECASE,
+    )
+    if rel_match:
+        amount = int(rel_match.group(1))
+        unit = rel_match.group(2).lower()
+        now = datetime.now(LOCAL_TIMEZONE)
+        if unit.startswith("sec"):
+            return now + timedelta(seconds=amount)
+        if unit.startswith("min"):
+            return now + timedelta(minutes=amount)
+        if unit.startswith("h"):
+            return now + timedelta(hours=amount)
+        if unit.startswith("d"):
+            return now + timedelta(days=amount)
+        if unit.startswith("w"):
+            return now + timedelta(weeks=amount)
+
     day_part_times = {
         "morning": (6, 30),
         "afternoon": (12, 30),
@@ -614,15 +645,65 @@ def _parse_chat_reminder(prompt: str) -> tuple[str, str, str | None] | None:
         text, when, recurrence = match.groups()
         return _reminder_result(text, when, recurrence)
 
+    # "set a timer for 10 minutes [for pasta]" / "timer for 5 mins"
+    match = re.fullmatch(
+        r"(?:(?:set|start|create|add)\s+(?:a\s+)?)?timer\s+(?:for\s+)?"
+        r"(\d+\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?))"
+        r"(?:\s+(?:for|to|about)\s+(.+))?",
+        normalized_prompt,
+        re.IGNORECASE,
+    )
+    if match:
+        when, text = match.groups()
+        label = text.strip() if text else f"Timer ({when.strip()})"
+        return _reminder_result(label, when, None, relative=True)
+
+    # "set an alarm for 7am [to wake up]" / "wake me up at 6:30am"
+    match = re.fullmatch(
+        r"(?:(?:set|create|add)\s+(?:an?\s+)?alarm\s+(?:for|at)\s+(.+?)"
+        r"(?:\s+(?:for|to|about)\s+(.+))?"
+        r"|wake\s+me(?:\s+up)?\s+(?:at|in)\s+(.+?)(?:\s+to\s+(.+))?)",
+        normalized_prompt,
+        re.IGNORECASE,
+    )
+    if match:
+        g1, g2, g3, g4 = match.groups()
+        when = (g1 or g3).strip()
+        label = (g2 or g4 or ("Wake up" if g3 else "Alarm")).strip()
+        is_rel = bool(re.match(r"^\d+\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?)\b", when, re.IGNORECASE))
+        return _reminder_result(label, when, None, relative=is_rel)
+
+    # "ping me in 15 minutes to check the build"
+    match = re.fullmatch(
+        r"(?:ping|notify|alert|nudge)\s+me\s+in\s+(.+?)\s+(?:to|about|for)\s+(.+)",
+        normalized_prompt,
+        re.IGNORECASE,
+    )
+    if match:
+        when, text = match.groups()
+        return _reminder_result(text, when, None, relative=True)
+
     return None
 
 
 def _normalize_command(prompt: str) -> str:
-    """Strip greetings, politeness, and trailing punctuation from a command."""
+    """Strip greetings, politeness, conversational lead-ins, and trailing punctuation."""
     normalized = re.sub(r"\s+", " ", prompt.strip()).rstrip(".!?")
     normalized = re.sub(
-        r"^(?:hey\s+)?(?:spidey|s\.p\.i\.d\.e\.y)[,\s]+", "", normalized, flags=re.IGNORECASE
+        r"^(?:hey\s+|hi\s+|hello\s+)?(?:spidey|s\.p\.i\.d\.e\.y)[,\s]+",
+        "",
+        normalized,
+        flags=re.IGNORECASE,
     )
+    # Strip conversational filler prefixes ("Now I am...", "Okay please...", "Alright, ...")
+    # while preserving short follow-up phrases like "now" or "okay now".
+    if len(normalized.split()) > 2:
+        normalized = re.sub(
+            r"^(?:(?:now|okay|ok|alright|so|well|actually|hey)\b[,\s]*)+",
+            "",
+            normalized,
+            flags=re.IGNORECASE,
+        )
     normalized = re.sub(
         r"^(?:(?:please|kindly)\s+|(?:can|could|would)\s+you\s+)+",
         "",
@@ -667,12 +748,23 @@ def _reminder_clarification(prompt: str) -> str | None:
 _WEB_SEARCH_PATTERN = re.compile(
     r"^(?:web\s*search|search\s+(?:the\s+)?(?:web|internet|online)"
     r"|(?:google|bing|duckduckgo)|browse\s+(?:the\s+)?(?:web|internet))"
-    r"(?:\s+(?:for|about))?\s+(?P<query>.+)$",
+    r"(?:\s+(?:for|about|on))?\s+(?P<query>.+)$",
+    re.IGNORECASE,
+)
+_WEB_SEARCH_SUFFIX_PATTERN = re.compile(
+    r"^(?P<query>.+?)\s+(?:on\s+(?:the\s+)?(?:web|internet|google)|"
+    r"in\s+web\s*search|with\s+web\s*search|via\s+web\s*search|"
+    r"search\s+(?:the\s+)?(?:web|online)|web\s*search)$",
+    re.IGNORECASE,
+)
+_LATEST_NEWS_SEARCH_PATTERN = re.compile(
+    r"^(?:what\s+(?:are|is)\s+(?:the\s+)?)?(?:latest|breaking|current|today'?s)\s+"
+    r"(?:news|headlines|updates)\s+(?:in|about|on|for|from)\s+(?P<query>.+)$",
     re.IGNORECASE,
 )
 # "search for india sports news" and "look up the score" mean the same thing.
 _PLAIN_SEARCH_PATTERN = re.compile(
-    r"^(?:search|look\s+(?:it\s+|this\s+)?up)\s+(?:for\s+|about\s+)?(?P<query>.+)$",
+    r"^(?:search|look\s+(?:it\s+|this\s+)?up)\s+(?:for\s+|about\s+|on\s+)?(?P<query>.+)$",
     re.IGNORECASE,
 )
 # Keep local data queries local: "search my tasks", "search reminders", ...
@@ -687,6 +779,22 @@ def _parse_web_search_query(prompt: str) -> str | None:
     """Return the query of a search request, else None."""
     normalized = _normalize_command(prompt)
     match = _WEB_SEARCH_PATTERN.match(normalized)
+    if not match:
+        match = _WEB_SEARCH_SUFFIX_PATTERN.match(normalized)
+        if match:
+            cleaned = re.sub(
+                r"^(?:what\s+(?:are|is)\s+(?:the\s+)?|tell\s+me\s+(?:about\s+)?|"
+                r"find\s+(?:me\s+)?|show\s+(?:me\s+)?)",
+                "",
+                match.group("query").strip(),
+                flags=re.IGNORECASE,
+            )
+            return cleaned.strip(" \"'") if len(cleaned.strip(" \"'")) >= 2 else None
+    if not match:
+        match = _LATEST_NEWS_SEARCH_PATTERN.match(normalized)
+        if match:
+            topic = match.group("query").strip(" \"'")
+            return f"latest news in {topic}" if len(topic) >= 2 else None
     if not match:
         match = _PLAIN_SEARCH_PATTERN.match(normalized)
         if not match or _LOCAL_SEARCH_TARGET.match(match.group("query")):
@@ -743,6 +851,7 @@ def _web_search_reply(query: str) -> tuple[str, str]:
 
 
 def _parse_task_create(prompt: str) -> tuple[str, str] | None:
+    normalized = _normalize_command(prompt)
     match = re.fullmatch(
         r"(?:add|create|new)\s+(?:a\s+)?(?:new\s+)?(?:task|to[\s-]?do)"
         r"(?:\s+(?:to|for|in|about))*"
@@ -750,9 +859,28 @@ def _parse_task_create(prompt: str) -> tuple[str, str] | None:
         r"(?:\s*[:\-]\s*|\s+)(.+?)"
         r"(?:\s+(?:with\s+)?priority\s+(low|medium|high)"
         r"|\s+(?:with\s+)?(low|medium|high)\s+priority)?",
-        _normalize_command(prompt),
+        normalized,
         re.IGNORECASE,
     )
+    if not match:
+        # Shorthand prefix: "todo: buy milk" or "task: finish slides high priority"
+        match = re.fullmatch(
+            r"(?:task|to[\s-]?do)\s*[:\-]\s*(.+?)"
+            r"(?:\s+(?:with\s+)?priority\s+(low|medium|high)"
+            r"|\s+(?:with\s+)?(low|medium|high)\s+priority)?",
+            normalized,
+            re.IGNORECASE,
+        )
+    if not match:
+        # Natural list phrasing: "add buy milk to my tasks" / "put finish report on my todo list"
+        match = re.fullmatch(
+            r"(?:add|put)\s+(.+?)\s+(?:to|on|into)\s+(?:my\s+|the\s+)?"
+            r"(?:tasks?|task\s+list|to[\s-]?dos?|to[\s-]?do\s+list)"
+            r"(?:\s+(?:with\s+)?priority\s+(low|medium|high)"
+            r"|\s+(?:with\s+)?(low|medium|high)\s+priority)?",
+            normalized,
+            re.IGNORECASE,
+        )
     if not match:
         return None
     title = match.group(1).strip(" :-'\"")
@@ -762,10 +890,30 @@ def _parse_task_create(prompt: str) -> tuple[str, str] | None:
     return title, priority.lower()
 
 
+def _fuzzy_best_match(
+    query: str, items: list[dict[str, Any]], key: str, threshold: float = 0.76
+) -> dict[str, Any] | None:
+    """Return a single fuzzy match when the user has a minor typo (e.g. garder vs garden)."""
+    if len(query) < 3 or not items:
+        return None
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for item in items:
+        candidate = re.sub(r"\s+", " ", str(item.get(key, "")).strip().lower())
+        ratio = difflib.SequenceMatcher(None, query, candidate).ratio()
+        if ratio >= threshold:
+            scored.append((ratio, item))
+    if not scored:
+        return None
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    if len(scored) > 1 and abs(scored[0][0] - scored[1][0]) < 0.05:
+        return None
+    return scored[0][1]
+
+
 def _find_task_reference(
     reference: str, include_completed: bool = True
 ) -> dict[str, Any] | None:
-    """Resolve '#12', '12', or a unique (partial) task title."""
+    """Resolve '#12', '12', or a unique (partial or fuzzy) task title."""
     cleaned = reference.strip().strip("#").strip()
     if not cleaned:
         return None
@@ -805,7 +953,7 @@ def _find_task_reference(
         raise ValueError(
             f"More than one task matches '{reference}'. Use 'task <number>'."
         )
-    return None
+    return _fuzzy_best_match(normalized, tasks, "title")
 
 
 def _format_task_list(tasks: list[dict[str, Any]], completed: bool = False) -> str:
@@ -928,6 +1076,15 @@ def _is_task_list_request(prompt: str) -> bool:
     ):
         return False
 
+    # Bare / short task queries: "tasks", "my tasks", "todos", "pending tasks", "tasks today"
+    if re.fullmatch(
+        r"(?:(?:my|the|all|today'?s|daily|current)\s+)*"
+        r"(?:tasks?|to[\s-]?dos?|task\s+list|to[\s-]?do\s+list)"
+        r"(?:\s+(?:today|for\s+today|status|list))?",
+        normalized_prompt,
+    ):
+        return True
+
     task_reference = re.search(
         r"\b(?:tasks?|to[\s-]?dos?|things to do)\b",
         normalized_prompt,
@@ -936,18 +1093,22 @@ def _is_task_list_request(prompt: str) -> bool:
         # Common shorthand such as “what's pending?” or “what are the
         # pending to do?” still means the user's open task list.
         return bool(
-            re.search(r"\b(?:what|which|show|list|check|tell me)\b", normalized_prompt)
-            and re.search(r"\b(?:pending|unfinished|remaining|left|to do)\b", normalized_prompt)
+            re.search(r"\b(?:what|which|show|list|check|tell me|any)\b", normalized_prompt)
+            and re.search(
+                r"\b(?:pending|unfinished|remaining|left|to do|need to complete|need to do)\b",
+                normalized_prompt,
+            )
         )
 
     list_intent = re.search(
         r"\b(?:show|list|check|review|see|find|what|which|tell me|"
-        r"do i have|are there)\b",
+        r"do i have|are there|any)\b",
         normalized_prompt,
     )
     pending_intent = re.search(
         r"\b(?:pending|incomplete|unfinished|remaining|left|to do|"
-        r"need to do|still need to do|open)\b",
+        r"need to do|still need to do|need to complete|to complete|"
+        r"need to finish|open|completed|done|finished)\b",
         normalized_prompt,
     )
     return bool(list_intent or pending_intent)
@@ -968,15 +1129,23 @@ def _is_habit_list_request(prompt: str) -> bool:
     ):
         return False
 
+    # Bare / short habit queries: "habits", "my habits", "habits today", "daily habits", "habit status"
+    if re.fullmatch(
+        r"(?:(?:my|the|all|today'?s|daily|current)\s+)*"
+        r"habits?(?:\s+(?:today|for\s+today|status|list|streaks?))?",
+        normalized_prompt,
+    ):
+        return True
+
     list_intent = re.search(
         r"\b(?:check|show|list|review|see|tell me|find|what|which|"
-        r"do i have|are there|any)\b",
+        r"do i have|are there|any|status)\b",
         normalized_prompt,
     )
     incomplete_intent = re.search(
         r"\b(?:pending|incomplete|unfinished|remaining|left|not complete|"
         r"not completed|still not complete|still not completed|to complete|"
-        r"to do|need to complete|need to finish)\b",
+        r"to do|need to complete|need to finish|done|completed|today)\b",
         normalized_prompt,
     )
     return bool(list_intent or incomplete_intent)
@@ -1016,15 +1185,43 @@ def _parse_chat_habit(prompt: str) -> tuple[str, str] | None:
         re.IGNORECASE,
     )
     if not match:
+        match = re.fullmatch(
+            r"habit\s*[:\-]\s*(.+)"
+            r"|(?:add|put)\s+(.+?)\s+(?:to|on|into)\s+(?:my\s+|the\s+)?(?:daily\s+)?habits?"
+            r"|track\s+(.+?)\s+(?:every\s*day|daily)",
+            normalized_prompt,
+            re.IGNORECASE,
+        )
+        if match:
+            raw = next((g for g in match.groups() if g), "")
+            habit_name = raw.strip(" :-'\"")
+            return (habit_name, "Activity") if habit_name else None
         return None
     habit_name = match.group(1).strip(" :-'\"")
     return (habit_name, "Activity") if habit_name else None
 
 
+def _parse_habit_uncomplete(prompt: str) -> str | None:
+    """Match 'uncheck habit X', 'undo habit X', or 'mark habit X as not done'."""
+    normalized = _normalize_command(prompt)
+    match = re.fullmatch(
+        r"(?:uncheck|un-check|undo|uncomplete|un-complete|reset)\s+"
+        r"(?:(?:the|my)\s+)?habits?\s+(.+)"
+        r"|mark\s+(?:(?:the|my)\s+)?(?:habit\s+)?(.+?)\s+as\s+"
+        r"(?:not\s+done|not\s+completed|incomplete|unchecked|pending)",
+        normalized,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    target = (match.group(1) or match.group(2)).strip()
+    return re.sub(r"^(?:my|the)\s+", "", target, flags=re.IGNORECASE)
+
+
 def _parse_habit_completion(prompt: str) -> str | None:
     """Match an explicit 'complete habit <name>' command."""
     match = re.fullmatch(
-        r"(?:complete|finish|done\s+with|mark\s+done|check\s+off)\s+"
+        r"(?:complete|completed|finish|finished|done\s+with|mark\s+done|check\s+off)\s+"
         r"(?:(?:the|my)\s+)?habits?\s+(.+)",
         _normalize_command(prompt),
         re.IGNORECASE,
@@ -1056,6 +1253,8 @@ def _parse_habit_delete(prompt: str) -> str | None:
 
 def _find_habit(habit_title: str) -> dict[str, Any] | None:
     normalized_title = re.sub(r"\s+", " ", habit_title.strip().lower())
+    if not normalized_title:
+        return None
     habits = memory_store.list_habits()
     exact_matches = [
         habit for habit in habits
@@ -1066,12 +1265,15 @@ def _find_habit(habit_title: str) -> dict[str, Any] | None:
     matches = [
         habit for habit in habits
         if normalized_title in habit["name"].strip().lower()
+        or habit["name"].strip().lower() in normalized_title
     ]
     if len(matches) > 1:
         raise ValueError(
             f"More than one habit matches '{habit_title}'. Be more specific."
         )
-    return matches[0] if matches else None
+    if len(matches) == 1:
+        return matches[0]
+    return _fuzzy_best_match(normalized_title, habits, "name")
 
 
 def _parse_task_completion(prompt: str) -> str | None:
@@ -1088,7 +1290,8 @@ def _parse_task_completion(prompt: str) -> str | None:
 
 
 _COMPLETION_VERB_PATTERN = (
-    r"(?:complete|completed|finish|finished|mark\s+done|check\s+off|done\s+with)"
+    r"(?:complete|completed|finish|finished|mark\s+done|mark\s+completed|"
+    r"check\s+off|tick\s+off|done\s+with)"
 )
 
 _ACTION_WITHOUT_HANDLER = re.compile(
@@ -1099,15 +1302,19 @@ _ACTION_WITHOUT_HANDLER = re.compile(
 
 
 def _parse_completion_target(prompt: str) -> str | None:
-    """Catch generic 'complete X' phrasing without an entity keyword."""
+    """Catch generic 'complete X' or 'now I am completed X' phrasing without an entity keyword."""
     normalized = _normalize_command(prompt)
     patterns = (
         rf"{_COMPLETION_VERB_PATTERN}\s+(.+)",
         r"mark\s+(?:the\s+|my\s+)?(.+?)\s+(?:tasks?\s+|habits?\s+)?(?:as\s+)?"
         r"(?:being\s+)?(?:completed|complete|done|finished)",
-        r"(?:i\s+)?(?:have\s+)?(?:completed|finished)\s+(.+)",
-        r"(.+?)\s+task\s+(?:completed|complete|finished|finish)"
-        r"(?:\s+(?:and\s+)?mark\s+it(?:\s+as)?(?:\s+completed)?)?",
+        r"(?:i\s+)?(?:am|'m|was|have|'ve|had|'d)?\s*"
+        r"(?:just\s+|already\s+|finally\s+|now\s+)*"
+        r"(?:completed|complete|finished|finish|done(?:\s+with)?|checked\s+off)\s+"
+        r"(?:with\s+|doing\s+)?(.+)",
+        r"(.+?)\s+(?:task|habit)\s+(?:is\s+)?(?:completed|complete|finished|finish|done)"
+        r"(?:\s+(?:and\s+)?mark\s+it(?:\s+as)?(?:\s+completed|\s+done)?)?",
+        r"(.+?)\s+is\s+(?:now\s+)?(?:completed|complete|finished|done)",
     )
     for pattern in patterns:
         match = re.fullmatch(pattern, normalized, re.IGNORECASE)
@@ -1123,7 +1330,10 @@ def _parse_completion_target(prompt: str) -> str | None:
         target = re.sub(
             r"^(?:the|my)\s+", "", target, flags=re.IGNORECASE
         )
-        target = re.sub(r"\s+mark\s+it$", "", target, flags=re.IGNORECASE).strip()
+        target = re.sub(
+            r"\s+(?:today|right\s+now|now|already)$", "", target, flags=re.IGNORECASE
+        ).strip()
+        target = re.sub(r"\s+mark\s+it.*$", "", target, flags=re.IGNORECASE).strip()
         if target:
             return target
 
@@ -1182,7 +1392,7 @@ def _find_reminder(reference: str) -> dict[str, Any]:
 
 def _is_reminder_list_request(prompt: str) -> bool:
     normalized = _normalize_command(prompt).lower()
-    if not re.search(r"\breminders?\b", normalized):
+    if not re.search(r"\b(?:reminders?|alarms?|timers?)\b", normalized):
         return False
     if _is_advice_question(normalized):
         return False
@@ -1192,9 +1402,15 @@ def _is_reminder_list_request(prompt: str) -> bool:
         normalized,
     ):
         return False
+    if re.fullmatch(
+        r"(?:(?:my|the|all|active|upcoming|pending|current)\s+)*"
+        r"(?:reminders?|alarms?|timers?)(?:\s+list)?",
+        normalized,
+    ):
+        return True
     return bool(
         re.search(
-            r"\b(?:show|list|check|what|which|tell me|do i have|any|upcoming|active)\b",
+            r"\b(?:show|list|check|what|which|tell me|do i have|any|upcoming|active|pending)\b",
             normalized,
         )
     )
@@ -1421,6 +1637,14 @@ def _complete_habit(habit: dict[str, Any], name: str = "") -> str:
         return f"**{habit['name']}** is already ticked off today — I won't count it twice."
     updated = memory_store.set_habit_completion(habit["id"], today, True)
     return _habit_completion_line(updated, name=name)
+
+
+def _uncomplete_habit(habit: dict[str, Any], name: str = "") -> str:
+    today = datetime.now(LOCAL_TIMEZONE).date().isoformat()
+    if today not in habit["completed_dates"]:
+        return f"**{habit['name']}** wasn't checked off today."
+    updated = memory_store.set_habit_completion(habit["id"], today, False)
+    return f"Unchecked **{updated['name']}** for today (streak: {updated['streak']})."
 
 
 _IDENTITY_QUESTION_PATTERNS = (
@@ -2096,12 +2320,20 @@ def _learning_complete_reply(reference: str, name: str = "") -> tuple[str, str]:
     )
 
 
+_LEARNING_BARE_PATTERN = re.compile(
+    r"^(?:(?:show|check|view|list|what(?:'s| is| are))\s+(?:me\s+)?)?"
+    r"(?:(?:my|the|all|current)\s+)*"
+    r"(?:learning|learning\s+roadmaps?|roadmaps?|learning\s+tracker|study\s+plan|learning\s+goals?)$",
+    re.IGNORECASE,
+)
+
+
 def _learning_command(prompt: str, name: str = "") -> tuple[str, str] | None:
     """Handle learning tracker commands; requires the schema to be ready."""
     if not learning_schema.is_initialized():
         return None
     normalized = _normalize_command(prompt)
-    if _LEARNING_PROGRESS_PATTERN.fullmatch(normalized):
+    if _LEARNING_PROGRESS_PATTERN.fullmatch(normalized) or _LEARNING_BARE_PATTERN.fullmatch(normalized):
         return _learning_progress_reply()
     if _LEARNING_NEXT_PATTERN.fullmatch(normalized):
         return _learning_next_reply()
@@ -2129,11 +2361,388 @@ def _learning_command(prompt: str, name: str = "") -> tuple[str, str] | None:
     return None
 
 
+_MEMORY_CREATE_PATTERN = re.compile(
+    r"^(?:(?:add|create|save|write|take)\s+(?:a\s+)?(?:new\s+)?(?:note|memory)"
+    r"(?:\s+(?:that|about|for))?(?:\s*[:\-]\s*|\s+)"
+    r"|remember\s+(?:that\s+|this\s*[:\-]?\s*)"
+    r"|note\s+down(?:\s*[:\-]\s*|\s+))(.+)$",
+    re.IGNORECASE,
+)
+
+_MEMORY_LIST_PATTERN = re.compile(
+    r"^(?:(?:show|list|check|view|read|what\s+are)\s+(?:me\s+)?)?"
+    r"(?:(?:my|the|all|saved)\s+)*(?:notes?|memories|saved\s+notes?|saved\s+memories)$",
+    re.IGNORECASE,
+)
+
+_MEMORY_DELETE_PATTERN = re.compile(
+    r"^(?:delete|remove|forget)\s+(?:(?:the|my)\s+)?(?:note|memory)\s+(?:#?)(.+)$",
+    re.IGNORECASE,
+)
+
+
+def _memory_command(prompt: str) -> tuple[str, str] | None:
+    """Deterministic CRUD handler for notes and memories."""
+    normalized = _normalize_command(prompt)
+    create_match = _MEMORY_CREATE_PATTERN.fullmatch(normalized)
+    if create_match:
+        content = create_match.group(1).strip(" \"'")
+        if not content:
+            return ("What would you like me to save in your notes?", "local-memory")
+        try:
+            saved = memory_store.add_memory(content)
+            return (f"Saved to your notes: **{saved['content']}**", "local-memory")
+        except ValueError as err:
+            if "already exists" in str(err).lower():
+                return (f"I already have **{content}** in your notes.", "local-memory")
+            raise
+
+    delete_match = _MEMORY_DELETE_PATTERN.fullmatch(normalized)
+    if delete_match:
+        ref = delete_match.group(1).strip(" \"'")
+        memories = memory_store.list_memories()
+        target_mem = None
+        if ref.isdigit():
+            mem_id = int(ref)
+            target_mem = next((m for m in memories if m["id"] == mem_id), None)
+        if target_mem is None:
+            lowered = ref.lower()
+            matches = [m for m in memories if lowered in m["content"].lower()]
+            if len(matches) == 1:
+                target_mem = matches[0]
+            elif len(matches) > 1:
+                raise ValueError(f"More than one note matches '{ref}'. Be more specific.")
+        if target_mem is None:
+            raise ValueError(f"No saved note matched '{ref}'.")
+        memory_store.delete_memory(target_mem["id"])
+        return (f"Removed note: **{target_mem['content']}**.", "local-memory")
+
+    if _MEMORY_LIST_PATTERN.fullmatch(normalized):
+        memories = memory_store.list_memories()
+        if not memories:
+            return ("You don't have any saved notes yet. Say 'add note: <text>' to save one.", "local-memory")
+        lines = [f"- #{m['id']} {m['content']}" for m in memories[:15]]
+        return ("Here are your saved notes:\n" + "\n".join(lines), "local-memory")
+
+    return None
+
+
+_PRONOUN_TARGETS = {
+    "it", "that", "this", "this one", "that one", "the one",
+    "the task", "the habit", "that task", "that habit", "this task", "this habit",
+    "first", "the first", "first one", "the first one", "1st", "the 1st",
+    "second", "the second", "second one", "the second one", "2nd", "the 2nd",
+    "third", "the third", "third one", "the third one", "3rd", "the 3rd",
+    "both", "both of them", "them", "all", "all of them", "everything",
+    "all tasks", "all my tasks", "all habits", "all my habits",
+}
+
+
+def _extract_context_entities(
+    chat_id: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return (mentioned_tasks, mentioned_habits) from the recent assistant messages in chat_id."""
+    messages = memory_store.get_messages(chat_id) if chat_id else []
+    assistant_msgs = [
+        m["content"] for m in reversed(messages) if m.get("role") == "assistant"
+    ][:3]
+    all_habits = memory_store.list_habits()
+    all_tasks = memory_store.list_tasks(include_completed=True)
+
+    for content in assistant_msgs:
+        lower_content = content.lower()
+        task_ids = [int(tid) for tid in re.findall(r"#(\d+)\b", content)]
+        if task_ids and (
+            "task" in lower_content
+            or "list" in lower_content
+            or "still to do" in lower_content
+            or "priority" in lower_content
+            or "next up" in lower_content
+        ):
+            matched_tasks = [
+                t for tid in task_ids for t in all_tasks if t["id"] == tid
+            ]
+            if matched_tasks:
+                return matched_tasks, []
+
+        mentioned_habits: list[tuple[int, dict[str, Any]]] = []
+        for habit in all_habits:
+            h_name = habit["name"].strip().lower()
+            pos = lower_content.find(h_name)
+            if pos != -1:
+                mentioned_habits.append((pos, habit))
+        if mentioned_habits and (
+            "habit" in lower_content
+            or "streak" in lower_content
+            or "tackle" in lower_content
+            or "list today" in lower_content
+            or "checked off" in lower_content
+        ):
+            mentioned_habits.sort(key=lambda pair: pair[0])
+            return [], [h for _, h in mentioned_habits]
+
+        mentioned_tasks: list[tuple[int, dict[str, Any]]] = []
+        for task in all_tasks:
+            t_title = task["title"].strip().lower()
+            pos = lower_content.find(t_title)
+            if pos != -1:
+                mentioned_tasks.append((pos, task))
+        if mentioned_tasks:
+            mentioned_tasks.sort(key=lambda pair: pair[0])
+            return [t for _, t in mentioned_tasks], []
+
+    return [], []
+
+
+def _resolve_contextual_completion(
+    target: str, chat_id: str, name: str = ""
+) -> tuple[str, str] | None:
+    """Resolve pronouns ('it', 'that', 'the first one', 'both', 'all') using recent chat history."""
+    cleaned = re.sub(r"\s+", " ", target.strip().lower())
+    if cleaned not in _PRONOUN_TARGETS:
+        return None
+
+    all_habits = memory_store.list_habits()
+    pending_tasks = memory_store.list_tasks(include_completed=False)
+    today = datetime.now(LOCAL_TIMEZONE).date().isoformat()
+    pending_habits = [h for h in all_habits if today not in h["completed_dates"]]
+
+    # Handle explicit batch targets ("all tasks", "all habits")
+    if cleaned in {"all tasks", "all my tasks"}:
+        if not pending_tasks:
+            return ("All your tasks are already completed!", "local-task-manager")
+        titles = [t["title"] for t in pending_tasks]
+        for t in pending_tasks:
+            _complete_task(t, name=name)
+        return (
+            f"Marked all {len(titles)} pending tasks completed: "
+            + ", ".join(f"**{title}**" for title in titles) + ".",
+            "local-task-manager",
+        )
+    if cleaned in {"all habits", "all my habits"}:
+        if not pending_habits:
+            return ("All your habits are already checked off for today!", "local-habit-manager")
+        names = [h["name"] for h in pending_habits]
+        for h in pending_habits:
+            _complete_habit(h, name=name)
+        return (
+            f"Checked off all {len(names)} habits for today: "
+            + ", ".join(f"**{n}**" for n in names) + ".",
+            "local-habit-manager",
+        )
+
+    ctx_tasks, ctx_habits = _extract_context_entities(chat_id)
+    is_batch = cleaned in {"both", "both of them", "them", "all", "all of them", "everything"}
+
+    if is_batch:
+        if ctx_tasks:
+            open_ctx = [t for t in ctx_tasks if not t["completed"]] or ctx_tasks
+            for t in open_ctx:
+                _complete_task(t, name=name)
+            return (
+                "Completed: " + ", ".join(f"**{t['title']}**" for t in open_ctx) + ".",
+                "local-task-manager",
+            )
+        if ctx_habits:
+            for h in ctx_habits:
+                _complete_habit(h, name=name)
+            return (
+                "Checked off: " + ", ".join(f"**{h['name']}**" for h in ctx_habits) + ".",
+                "local-habit-manager",
+            )
+
+    ordinal = 0
+    if "second" in cleaned or "2nd" in cleaned:
+        ordinal = 1
+    elif "third" in cleaned or "3rd" in cleaned:
+        ordinal = 2
+
+    if ctx_tasks and "habit" not in cleaned:
+        chosen = ctx_tasks[ordinal] if ordinal < len(ctx_tasks) else ctx_tasks[0]
+        return (_complete_task(chosen, name=name), "local-task-manager")
+
+    if ctx_habits and "task" not in cleaned:
+        chosen = ctx_habits[ordinal] if ordinal < len(ctx_habits) else ctx_habits[0]
+        return (_complete_habit(chosen, name=name), "local-habit-manager")
+
+    # Fallback: if there is globally only 1 pending task, complete it
+    if len(pending_tasks) == 1 and ("habit" not in cleaned):
+        return (_complete_task(pending_tasks[0], name=name), "local-task-manager")
+
+    if len(pending_habits) == 1 and ("task" not in cleaned):
+        return (_complete_habit(pending_habits[0], name=name), "local-habit-manager")
+
+    return None
+
+
+def _resolve_contextual_mutation(
+    prompt: str, chat_id: str, name: str = ""
+) -> tuple[str, str] | None:
+    """Handle contextual 'delete it', 'make it high priority', 'undo it', or 'reopen it'."""
+    normalized = _normalize_command(prompt).lower()
+
+    # 1. Contextual Delete: "delete it", "remove that", "delete the first one"
+    del_match = re.fullmatch(
+        r"(?:delete|remove|drop|cancel)\s+"
+        r"(it|that|this|that\s+one|this\s+one|the\s+task|the\s+habit|"
+        r"(?:the\s+)?(?:first|second|third|1st|2nd|3rd)(?:\s+one)?)",
+        normalized,
+        re.IGNORECASE,
+    )
+    if del_match:
+        target_ref = del_match.group(1)
+        ordinal = 1 if ("second" in target_ref or "2nd" in target_ref) else (2 if ("third" in target_ref or "3rd" in target_ref) else 0)
+        ctx_tasks, ctx_habits = _extract_context_entities(chat_id)
+        if ctx_tasks and "habit" not in target_ref:
+            chosen = ctx_tasks[ordinal] if ordinal < len(ctx_tasks) else ctx_tasks[0]
+            memory_store.delete_task(chosen["id"])
+            remaining = len(memory_store.list_tasks(include_completed=False))
+            return (assistant_tone.task_deleted(chosen["title"], remaining), "local-task-manager")
+        if ctx_habits and "task" not in target_ref:
+            chosen = ctx_habits[ordinal] if ordinal < len(ctx_habits) else ctx_habits[0]
+            memory_store.delete_habit(chosen["id"])
+            return (assistant_tone.habit_deleted(chosen["name"]), "local-habit-manager")
+
+    # 2. Contextual Priority Update: "make it high priority", "set its priority to low"
+    prio_match = re.fullmatch(
+        r"(?:make|set|change|update)\s+"
+        r"(?:it|that|this|its\s+priority|the\s+priority|the\s+task)\s+"
+        r"(?:to\s+)?(?:be\s+)?(?:priority\s+)?(low|medium|high)(?:\s+priority)?",
+        normalized,
+        re.IGNORECASE,
+    )
+    if prio_match:
+        new_prio = prio_match.group(1).lower()
+        ctx_tasks, _ = _extract_context_entities(chat_id)
+        if ctx_tasks:
+            chosen = ctx_tasks[0]
+            updated = memory_store.update_task(chosen["id"], priority=new_prio)
+            return (assistant_tone.task_priority(updated["title"], updated["priority"]), "local-task-manager")
+
+    # 3. Contextual Undo / Reopen / Uncheck: "undo it", "uncheck it", "reopen it", "mark it not done"
+    undo_match = re.fullmatch(
+        r"(?:undo|uncheck|un-check|reopen|re-open|uncomplete)\s+"
+        r"(it|that|this|the\s+task|the\s+habit)"
+        r"|mark\s+(it|that|this)\s+(?:as\s+)?(?:not\s+done|not\s+completed|incomplete|open|pending)",
+        normalized,
+        re.IGNORECASE,
+    )
+    if undo_match:
+        ctx_tasks, ctx_habits = _extract_context_entities(chat_id)
+        if ctx_tasks:
+            chosen = ctx_tasks[0]
+            updated = memory_store.update_task(chosen["id"], completed=False)
+            return (assistant_tone.task_reopened(updated["title"], name=name), "local-task-manager")
+        if ctx_habits:
+            chosen = ctx_habits[0]
+            return (_uncomplete_habit(chosen, name=name), "local-habit-manager")
+
+    return None
+
+
+_BRIEFING_PATTERN = re.compile(
+    r"^(?:(?:show|give|tell|check|what(?:'s| is))\s+(?:me\s+)?)?"
+    r"(?:(?:my|the|today'?s|daily|morning|evening|current)\s+)*"
+    r"(?:briefing|daily\s+summary|summary|status|overview|day\s+summary|"
+    r"dashboard\s+status|main\s+page\s+status|plate|on\s+my\s+plate)"
+    r"|^how\s+am\s+i\s+doing(?:\s+today)?$"
+    r"|^what(?:'s| is)\s+on\s+my\s+plate(?:\s+today)?$",
+    re.IGNORECASE,
+)
+
+_XP_STATUS_PATTERN = re.compile(
+    r"^(?:(?:show|check|what(?:'s| is| are))\s+(?:me\s+)?)?"
+    r"(?:(?:my|the|current)\s+)*"
+    r"(?:xp|level|gamification|achievements?|streaks?|global\s+streak|score|points)$",
+    re.IGNORECASE,
+)
+
+
+def _xp_status_command(prompt: str) -> tuple[str, str] | None:
+    normalized = _normalize_command(prompt)
+    if not _XP_STATUS_PATTERN.fullmatch(normalized):
+        return None
+    stats = memory_store.get_gamification()
+    xp = stats.get("xp", 0)
+    level = (xp // 100) + 1
+    streak = stats.get("global_streak", 0)
+    habits = memory_store.list_habits()
+    top_habit = max(habits, key=lambda h: h.get("streak", 0)) if habits else None
+    lines = [
+        f"⚡ **Level {level}** ({xp} XP) — 🔥 **{streak}-day global streak**"
+    ]
+    if top_habit and top_habit.get("streak", 0) > 0:
+        lines.append(f"- Top habit streak: **{top_habit['name']}** ({top_habit['streak']} days)")
+    achievements = stats.get("achievements") or []
+    if achievements:
+        unlocked = [a.get("title") or a.get("name") or str(a) for a in achievements if isinstance(a, dict) and a.get("unlocked", True)]
+        if unlocked:
+            lines.append(f"- Achievements: {', '.join(unlocked[:5])}")
+    return ("\n".join(lines), "local-gamification")
+
+
+def _daily_briefing_command(prompt: str) -> tuple[str, str] | None:
+    normalized = _normalize_command(prompt)
+    if not _BRIEFING_PATTERN.fullmatch(normalized):
+        return None
+    today = datetime.now(LOCAL_TIMEZONE).date().isoformat()
+    open_tasks = memory_store.list_tasks(include_completed=False)
+    all_habits = memory_store.list_habits()
+    pending_habits = [h for h in all_habits if today not in h["completed_dates"]]
+    done_habits = [h for h in all_habits if today in h["completed_dates"]]
+    reminders = memory_store.list_reminders()
+    stats = memory_store.get_gamification()
+    xp = stats.get("xp", 0)
+    level = (xp // 100) + 1
+
+    sections = [f"**Daily Briefing** (Level {level} • {xp} XP)"]
+    if open_tasks:
+        preview = ", ".join(f"#{t['id']} **{t['title']}** ({t['priority']})" for t in open_tasks[:3])
+        sections.append(f"- **Tasks ({len(open_tasks)} pending):** {preview}")
+    else:
+        sections.append("- **Tasks:** All caught up! ✅")
+
+    if all_habits:
+        if pending_habits:
+            h_preview = ", ".join(f"**{h['name']}**" for h in pending_habits)
+            sections.append(
+                f"- **Habits ({len(done_habits)}/{len(all_habits)} done today):** Still open: {h_preview}"
+            )
+        else:
+            sections.append(f"- **Habits ({len(all_habits)}/{len(all_habits)}):** All completed today! ✅")
+    else:
+        sections.append("- **Habits:** None tracked yet.")
+
+    if reminders:
+        r_preview = ", ".join(f"**{r['text']}** ({_format_due_date(r['run_at'])})" for r in reminders[:2])
+        sections.append(f"- **Reminders ({len(reminders)} active):** {r_preview}")
+
+    if learning_schema.is_initialized():
+        try:
+            next_items = learning_progress.next_topics(limit=1)
+            if next_items:
+                sections.append(
+                    f"- **Next Learning Topic:** **{next_items[0]['name']}** ({next_items[0]['roadmap_name']})"
+                )
+        except Exception:
+            pass
+
+    return ("\n".join(sections), "local-briefing")
+
+
 def _handle_local_command(prompt: str, chat_id: str) -> tuple[str, str] | None:
-    """Answer tasks, habits, reminders, greetings, and identity locally."""
+    """Answer tasks, habits, reminders, notes, greetings, and identity locally."""
     page = _parse_navigation(prompt)
     if page:
         return (f"Opening {page}.", f"local-navigate:{page}")
+
+    briefing = _daily_briefing_command(prompt)
+    if briefing is not None:
+        return briefing
+
+    xp_status = _xp_status_command(prompt)
+    if xp_status is not None:
+        return xp_status
 
     profile = _profile_answer(prompt)
     if profile is not None:
@@ -2151,8 +2760,16 @@ def _handle_local_command(prompt: str, chat_id: str) -> tuple[str, str] | None:
     if identity is not None:
         return (identity, "local-identity")
 
+    memory_cmd = _memory_command(prompt)
+    if memory_cmd is not None:
+        return memory_cmd
+
     # Entity commands address the user by name when a name was saved.
     name = _user_name(_user_fact_memories())
+
+    ctx_mutation = _resolve_contextual_mutation(prompt, chat_id, name=name)
+    if ctx_mutation is not None:
+        return ctx_mutation
 
     reminder_request = _parse_chat_reminder(prompt)
     if reminder_request:
@@ -2239,7 +2856,7 @@ def _handle_local_command(prompt: str, chat_id: str) -> tuple[str, str] | None:
         wants_completed = bool(
             re.search(r"\b(?:completed|done|finished|closed)\b", normalized_prompt)
         ) and not re.search(
-            r"\b(?:pending|open|remaining|left|incomplete|unfinished)\b"
+            r"\b(?:pending|open|remaining|left|incomplete|unfinished|need to complete|to complete|need to finish)\b"
             r"|\bnot\s+(?:done|completed|finished)\b",
             normalized_prompt,
         )
@@ -2386,8 +3003,18 @@ def _handle_local_command(prompt: str, chat_id: str) -> tuple[str, str] | None:
         memory_store.delete_habit(habit["id"])
         return (assistant_tone.habit_deleted(habit["name"]), "local-habit-manager")
 
+    habit_uncomplete = _parse_habit_uncomplete(prompt)
+    if habit_uncomplete is not None:
+        habit = _find_habit(habit_uncomplete)
+        if habit is None:
+            raise ValueError(f"No habit matched '{habit_uncomplete}'.")
+        return (_uncomplete_habit(habit, name=name), "local-habit-manager")
+
     habit_completion = _parse_habit_completion(prompt)
     if habit_completion is not None:
+        contextual = _resolve_contextual_completion(habit_completion, chat_id, name=name)
+        if contextual is not None:
+            return contextual
         habit = _find_habit(habit_completion)
         if habit is None:
             raise ValueError(f"No habit matched '{habit_completion}'.")
@@ -2395,6 +3022,9 @@ def _handle_local_command(prompt: str, chat_id: str) -> tuple[str, str] | None:
 
     task_completion = _parse_task_completion(prompt)
     if task_completion is not None:
+        contextual = _resolve_contextual_completion(task_completion, chat_id, name=name)
+        if contextual is not None:
+            return contextual
         task = _find_task_reference(task_completion)
         if task is None:
             raise ValueError(f"No task matched '{task_completion}'.")
@@ -2402,6 +3032,9 @@ def _handle_local_command(prompt: str, chat_id: str) -> tuple[str, str] | None:
 
     completion_target = _parse_completion_target(prompt)
     if completion_target is not None:
+        contextual = _resolve_contextual_completion(completion_target, chat_id, name=name)
+        if contextual is not None:
+            return contextual
         pending_task = _find_task_reference(
             completion_target, include_completed=False
         )
@@ -2478,11 +3111,12 @@ def resolve_short_follow_up(
 
 
 def _productivity_context(prompt: str) -> str:
-    """Current habits/tasks/learning, injected when the question is about them."""
+    """Current habits/tasks/learning, injected when the question is about them or the dashboard."""
     if not re.search(
         r"\b(?:habits?|tasks?|to[\s-]?dos?|routine|schedule|productiv\w*|"
         r"improve\w*|discipline|goals?|learning|studying|study|topics?|course\w*|"
-        r"skills?|practice)\b",
+        r"skills?|practice|main\s+page|dashboard|page|app|nothing|there|pending|"
+        r"completed|done|list)\b",
         prompt,
         re.IGNORECASE,
     ):
@@ -2500,7 +3134,9 @@ def _productivity_context(prompt: str) -> str:
     tasks = memory_store.list_tasks(include_completed=False)
     if tasks:
         lines.append("Pending tasks:")
-        lines.extend(f"- {t['title']} ({t['priority']})" for t in tasks[:8])
+        lines.extend(f"- #{t['id']} {t['title']} ({t['priority']})" for t in tasks[:8])
+    else:
+        lines.append("Pending tasks: none.")
     lines.extend(_learning_digest())
     return "\n".join(lines)
 

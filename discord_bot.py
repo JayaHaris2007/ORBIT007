@@ -222,6 +222,39 @@ class SpideyBot(commands.Bot):
             len(prompt),
         )
 
+        # Handle voice call intents ("join call", "!join call", "leave call", "voice on/off")
+        if message.guild is not None:
+            norm_call = re.sub(r"\s+", " ", prompt.strip().lower()).rstrip(".!?")
+            voice_mgr = get_discord_voice_manager()
+            if re.fullmatch(
+                r"(?:(?:call\s+)?join(?:\s+(?:the\s+|my\s+)?(?:call|voice|vc|voice\s+channel))?|"
+                r"hop\s+(?:in|into)\s+(?:call|voice|vc)|connect\s+to\s+(?:voice|call|vc))",
+                norm_call,
+            ):
+                _, msg = await voice_mgr.join_call(message)
+                await message.reply(msg)
+                return
+            if re.fullmatch(
+                r"(?:(?:call\s+)?leave(?:\s+(?:the\s+|my\s+)?(?:call|voice|vc|voice\s+channel))?|"
+                r"disconnect(?:\s+from\s+(?:call|voice|vc))?|hang\s+up)",
+                norm_call,
+            ):
+                msg = await voice_mgr.leave_call(message.guild.id)
+                await message.reply(msg)
+                return
+            if re.fullmatch(r"(?:call\s+)?stop(?:\s+(?:speaking|talking|voice))?", norm_call):
+                msg = voice_mgr.stop_speaking(message.guild.id)
+                await message.reply(msg)
+                return
+            voice_toggle_match = re.fullmatch(
+                r"(?:call\s+)?voice\s+(on|off|enable|disable|1|0)", norm_call
+            )
+            if voice_toggle_match:
+                enable = voice_toggle_match.group(1) in {"on", "enable", "1"}
+                msg = voice_mgr.set_voice_enabled(message.guild.id, enable)
+                await message.reply(msg)
+                return
+
         chat = app.memory_store.get_or_create_external_chat(
             DISCORD_PROVIDER, str(message.author.id)
         )
@@ -448,6 +481,41 @@ async def call_voice_toggle(ctx: commands.Context[Any], mode: str = "") -> None:
     else:
         msg = "Usage: `!call voice on` or `!call voice off`"
     await ctx.reply(msg)
+
+
+@bot.command(name="join")
+async def top_join_command(ctx: commands.Context[Any], *, _rest: str = "") -> None:
+    """Alias for !call join and !join call."""
+    voice_mgr = get_discord_voice_manager()
+    _, msg = await voice_mgr.join_call(ctx.message)
+    await ctx.reply(msg)
+
+
+@bot.command(name="leave")
+async def top_leave_command(ctx: commands.Context[Any], *, _rest: str = "") -> None:
+    """Alias for !call leave and !leave call."""
+    if ctx.guild is None:
+        await ctx.reply("Calls are only available in a server.")
+        return
+    voice_mgr = get_discord_voice_manager()
+    msg = await voice_mgr.leave_call(ctx.guild.id)
+    await ctx.reply(msg)
+
+
+@bot.command(name="stop")
+async def top_stop_command(ctx: commands.Context[Any], *, _rest: str = "") -> None:
+    """Alias for !call stop."""
+    if ctx.guild is None:
+        return
+    voice_mgr = get_discord_voice_manager()
+    msg = voice_mgr.stop_speaking(ctx.guild.id)
+    await ctx.reply(msg)
+
+
+@bot.command(name="voice")
+async def top_voice_command(ctx: commands.Context[Any], mode: str = "") -> None:
+    """Alias for !call voice on|off."""
+    await call_voice_toggle(ctx, mode=mode)
 
 
 @bot.event

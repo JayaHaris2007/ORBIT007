@@ -800,12 +800,20 @@ class MemoryStore:
             candidate = {"role": message["role"], "content": message["content"]}
             trial = [candidate, *selected]
             try:
-                token_count = len(tokenizer.apply_chat_template(
+                if tokenizer is None:
+                    raise TypeError("Tokenizer not loaded")
+                encoded = tokenizer.apply_chat_template(
                     trial, tokenize=True, add_generation_prompt=True
-                ))
-            except (TypeError, ValueError):
+                )
+                if isinstance(encoded, dict) or hasattr(encoded, "input_ids"):
+                    ids = encoded["input_ids"]
+                    token_count = len(ids[0]) if ids and isinstance(ids[0], list) else len(ids)
+                else:
+                    token_count = len(encoded)
+            except Exception:
                 token_count = sum(len(item["content"]) // 4 + 8 for item in trial)
             if token_count > max_tokens:
                 break
             selected = trial
         return selected
+
