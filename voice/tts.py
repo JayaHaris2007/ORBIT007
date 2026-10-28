@@ -6,6 +6,7 @@ import io
 import logging
 import os
 import threading
+import time
 from typing import Any
 
 import numpy as np
@@ -72,17 +73,28 @@ class OmniVoiceEngine:
 
             for dev, dt in attempts:
                 try:
+                    t0 = time.perf_counter()
                     torch_dtype = getattr(torch, dt, torch.float32)
                     self._model = OmniVoice.from_pretrained(
                         self.model_id, device_map=dev, dtype=torch_dtype
                     )
+                    load_time = time.perf_counter() - t0
+                    vram_mb = 0.0
+                    if torch.cuda.is_available() and dev.startswith("cuda"):
+                        vram_mb = torch.cuda.memory_allocated() / (1024 * 1024)
                     self.device, self.dtype, self.available, self.error = (
                         dev,
                         dt,
                         True,
                         None,
                     )
-                    log.info("OmniVoice loaded successfully on %s (%s)", dev, dt)
+                    log.info(
+                        "OmniVoice loaded successfully on %s (%s) in %.2fs (VRAM: %.1f MB)",
+                        dev,
+                        dt,
+                        load_time,
+                        vram_mb,
+                    )
                     return
                 except Exception as e:
                     self.error = repr(e)

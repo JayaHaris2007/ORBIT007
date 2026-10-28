@@ -1,14 +1,70 @@
 # Local AI Voice Interface
 
-This project combines the model files in `Models/`:
+This project combines the local models and modern voice pipeline:
 
-- `Models/LLM/` contains a local Qwen3-1.7B instruction model for generating
-  text.
-- `Models/voice/` contains Kokoro v1.0 and its voices for text-to-speech.
+- `Models/LLM/` contains a local Qwen3-1.7B instruction model for generating text.
+- `voice/` contains the complete voice engine powered by **OmniVoice** (`k2-fsa/OmniVoice`, 0.6B params) for text-to-speech, and `SpeechRecognition` for speech-to-text.
+- `Models/voice/` contains legacy Kokoro v1.0 files (superseded by OmniVoice).
 
-`app.py` is a small terminal interface. It reads a prompt with Python's
-`input()`, generates a response, writes the response to `output.wav`, and
-plays the WAV file on Windows.
+`app.py` is the FastAPI backend and terminal interface.
+
+## OmniVoice System (TTS & STT)
+
+The S.P.I.D.E.Y voice system provides real-time speech synthesis, speech recognition, live hands-free conversation, and Discord voice bridge.
+
+> [!IMPORTANT]
+> **OmniVoice Weights License Notice**: The OmniVoice model weights (`k2-fsa/OmniVoice`) are licensed under **CC-BY-NC (Creative Commons Attribution-NonCommercial 4.0 International)** for personal and non-commercial use only. Do not clone anyone's voice without authorization; use voice design or your own reference audio recording.
+
+### Architecture & Safeguards
+- **In-Memory Audio Streaming**: Audio is synthesized and streamed in memory as 24 kHz mono PCM / WAV. No audio is persisted to disk by default. Any transient files use `voice/tmp/` (git-ignored), which is completely purged on application startup and voice session reset.
+- **Fail-Safe Chat Operation**: Text chat and voice are strictly decoupled. If OmniVoice fails to load, runs out of VRAM, or encounters an error, text chat continues working uninterrupted and voice features degrade gracefully with a user notification.
+- **Automatic Device Fallback**: The TTS engine attempts to load on `TTS_DEVICE` (`cuda:0` in `float16`), fitting within the ~3.4 GB VRAM headroom remaining beside Qwen3 4-bit NF4. If CUDA OOM occurs, it automatically falls back to CPU `float32`.
+- **Thread-Safe Cancellation**: When the user interrupts or clicks Stop, synthesis cancellation is checked between sentence chunks and during generation, instantly silencing output and freeing buffers.
+
+### Voice Configuration Options
+Environment variables (optional, in `.env`):
+- `TTS_DEVICE`: `cuda:0` (default) or `cpu`.
+- `TTS_DTYPE`: `float16` (default for CUDA) or `float32` (default for CPU).
+- `TTS_MODEL_ID`: Hugging Face repo ID or local path (default: `k2-fsa/OmniVoice`).
+- `TTS_REFERENCE_AUDIO`: Optional path to custom reference audio clip for voice cloning (e.g. `TTS/audio.wav`).
+- `TTS_INSTRUCT`: Voice design description (e.g. `A clear, friendly, articulate assistant`).
+- `STT_ENGINE`: Speech-to-text engine (default: `whisper_local`).
+- `STT_ALLOW_CLOUD`: Defaults to `false`. Set to `true` only if you explicitly choose to allow cloud speech recognition (e.g. Google Speech API).
+- `DISCORD_VOICE_ALLOWED_USER_IDS`: Comma-separated list of Discord user IDs authorized to use voice call features.
+
+### Frontend Voice Controls (Web UI)
+1. **"Speak replies" Toggle Button**:
+   - Located in the Assistant subheader beside chat controls.
+   - When enabled, incoming assistant messages are automatically synthesized and spoken aloud sentence-by-sentence via an audio queue with seamless prefetching.
+2. **"Listen" Button (Speech to Text)**:
+   - Located in the chat composer bar.
+   - Click to speak; browser captures audio via AudioWorklet (16 kHz mono 16-bit PCM) and sends it for speech transcription. Transcribed text is placed directly in the composer.
+3. **"Stop" Button**:
+   - Appears whenever audio is synthesizing or playing.
+   - Immediately cancels the current turn, halts speech playback, and clears transient buffers.
+4. **"Live" Mode (Gemini Live Experience)**:
+   - Click the **Live** button in the Assistant header to open the full-screen interactive voice session.
+   - Hands-free, continuous conversation with real-time barge-in detection (speaking interrupts the bot immediately).
+   - Dynamic animated voice orb reflecting states: `IDLE`, `LISTENING`, `THINKING`, `SPEAKING`.
+   - Real-time turn latency metrics and headphones recommendation for echo prevention.
+
+### Discord Voice Call (Text In, Voice Out)
+S.P.I.D.E.Y can join a Discord voice channel and speak answers while you type messages in text:
+- **Join Call**: In any Discord server channel, join a voice channel and type:
+  ```text
+  !call join
+  ```
+  S.P.I.D.E.Y joins your voice channel and binds voice responses to the current text channel.
+- **Text In, Voice Out**: Type any message (e.g. `!ask What's on my schedule today?`). The bot replies in text AND speaks the response in the voice channel. Spoken output is capped at 500 characters for clarity.
+- **Voice Interruption**: Type `stop`, `stop talking`, or `!call stop` to immediately silence current speech.
+- **Toggle Voice**: `!call voice off` disables speech output (text only); `!call voice on` re-enables it.
+- **Leave Call**: Type `!call leave` to disconnect the bot from voice.
+- **Encryption Requirement**: Uses Discord's new DAVE End-to-End Voice Encryption powered by `discord.py[voice]` (`PyNaCl` + `davey`).
+
+### Voice Troubleshooting
+- **Microphone access denied in browser**: Ensure your browser allows microphone permissions on `http://localhost:5173`.
+- **CUDA Out of Memory during voice synthesis**: Set `TTS_DEVICE=cpu` in `.env` to run TTS entirely on CPU, or let the automatic fallback take effect.
+- **Discord voice audio not playing**: Verify that `PyNaCl` and `davey` are installed via `pip install "discord.py[voice]"` and that the bot has `Connect` and `Speak` permissions in the voice channel.
 
 ## Setup
 
