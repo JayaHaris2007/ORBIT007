@@ -77,6 +77,7 @@ TTS_MODEL_ID = os.environ.get("TTS_MODEL_ID", "k2-fsa/OmniVoice").strip() or "k2
 # Reference voice clip or voice design
 _default_ref = str(ROOT_DIR / "TTS" / "audio.wav")
 TTS_REF_AUDIO = os.environ.get("TTS_REF_AUDIO", _default_ref).strip()
+TTS_REF_TEXT = os.environ.get("TTS_REF_TEXT", "the box was thrown beside the path").strip()
 TTS_INSTRUCT = os.environ.get(
     "TTS_INSTRUCT", "female, young adult, moderate pitch, american accent"
 ).strip()

@@ -45,8 +45,12 @@ class OmniVoiceEngine:
         if not self.voice_kwargs:
             ref_path = config.TTS_REF_AUDIO
             if ref_path and os.path.isfile(ref_path):
-                self.voice_kwargs = {"ref_audio": ref_path, "speed": config.TTS_SPEED}
-                log.info("OmniVoice configured with reference audio: %s", ref_path)
+                self.voice_kwargs = {
+                    "ref_audio": ref_path,
+                    "ref_text": config.TTS_REF_TEXT,
+                    "speed": config.TTS_SPEED,
+                }
+                log.info("OmniVoice configured with reference audio: %s and ref text", ref_path)
             else:
                 self.voice_kwargs = {
                     "instruct": config.TTS_INSTRUCT,
