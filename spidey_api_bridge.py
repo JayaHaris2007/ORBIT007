@@ -364,6 +364,18 @@ def handle_request(method: str, raw_url: str, body: dict | None) -> tuple[int, d
         state = (query.get("state") or ["suggested"])[0]
         return 200, {"links": learning_progress.list_task_links(state=state)}
 
+    if path.startswith("/api/learning/links/") and method == "PATCH":
+        lid = int(path.split("/")[4])
+        state = str(payload.get("state") or "confirmed")
+        topic_id = payload.get("topic_id")
+        return 200, learning_progress.update_task_link(
+            lid, state, int(topic_id) if topic_id is not None else None
+        )
+
+    if path == "/api/learning/activity" and method == "GET":
+        limit = int((query.get("limit") or ["50"])[0])
+        return 200, {"activities": learning_progress.list_activities(limit=limit)}
+
     if path == "/api/learning/settings":
         if method == "GET":
             return 200, {"nudges_enabled": learning_progress.get_nudges_enabled()}

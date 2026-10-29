@@ -168,3 +168,116 @@ def test_loose_completion_phrasings_mark_topic_done(learning_db, phrasing, topic
     reply, provider = app._handle_local_command(phrasing, "c1")
     assert provider == "local-learning", phrasing
     assert _status(learning_db, topic) == "completed", phrasing
+
+
+def test_bare_learning_and_roadmap_topics_listing(learning_db):
+    reply, provider = app._handle_local_command("learning", "c1")
+    assert provider == "local-learning"
+    assert "Java & DSA" in reply
+
+    reply_topics, provider = app._handle_local_command("show topics in Java & DSA", "c1")
+    assert provider == "local-learning"
+    assert "Java Basics" in reply_topics
+    assert "Object-Oriented Programming" in reply_topics
+    assert "Locked" in reply_topics
+
+
+def test_hold_reopen_and_status_filters(learning_db):
+    app._handle_local_command("start learning Java Basics", "c1")
+    assert _status(learning_db, "Java Basics") == "learning"
+
+    in_prog, provider = app._handle_local_command("what am I currently learning", "c1")
+    assert provider == "local-learning"
+    assert "Java Basics" in in_prog
+
+    hold_reply, provider = app._handle_local_command("put Java Basics on hold", "c1")
+    assert provider == "local-learning"
+    assert _status(learning_db, "Java Basics") == "on_hold"
+
+    paused, _ = app._handle_local_command("topics on hold", "c1")
+    assert "Java Basics" in paused
+
+    app._handle_local_command("complete topic Java Basics", "c1")
+    assert _status(learning_db, "Java Basics") == "completed"
+
+    done_list, _ = app._handle_local_command("what topics have I completed", "c1")
+    assert "Java Basics" in done_list
+
+    reopen_reply, provider = app._handle_local_command("reopen learning Java Basics", "c1")
+    assert provider == "local-learning"
+    assert _status(learning_db, "Java Basics") == "not_started"
+
+
+def test_contextual_pronouns_and_ordinals_for_learning(learning_db):
+    chat_id = app.memory_store.create_chat()["id"]
+    app.memory_store.add_message(chat_id, "user", "what should I learn next in Java & DSA")
+    next_reply, _ = app._handle_local_command("what should I learn next in Java & DSA", chat_id)
+    app.memory_store.add_message(chat_id, "assistant", next_reply)
+
+    # "start it" should resolve to Java Basics from the assistant message
+    start_reply, provider = app._handle_local_command("start it", chat_id)
+    assert provider == "local-learning"
+    assert _status(learning_db, "Java Basics") == "learning"
+    app.memory_store.add_message(chat_id, "assistant", start_reply)
+
+    # "mark it completed" should complete Java Basics (not fall through to tasks)
+    comp_reply, provider = app._handle_local_command("mark it completed", chat_id)
+    assert provider == "local-learning"
+    assert _status(learning_db, "Java Basics") == "completed"
+    app.memory_store.add_message(chat_id, "assistant", comp_reply)
+
+    # "reopen it" should reopen Java Basics
+    reopen_reply, provider = app._handle_local_command("reopen it", chat_id)
+    assert provider == "local-learning"
+    assert _status(learning_db, "Java Basics") == "not_started"
+
+
+def test_roadmap_and_topic_crud_via_chat(learning_db):
+    reply, provider = app._handle_local_command(
+        "create technical roadmap Machine Learning", "c1"
+    )
+    assert provider == "local-learning"
+    assert "Machine Learning" in reply
+
+    t_reply, provider = app._handle_local_command(
+        "add topic Linear Regression to Machine Learning", "c1"
+    )
+    assert provider == "local-learning"
+    assert "Linear Regression" in t_reply
+    assert _status(learning_db, "Linear Regression") == "not_started"
+
+    prio_reply, provider = app._handle_local_command(
+        "set topic Linear Regression priority to high", "c1"
+    )
+    assert provider == "local-learning"
+    assert "high" in prio_reply
+
+    del_t_reply, provider = app._handle_local_command(
+        "delete topic Linear Regression", "c1"
+    )
+    assert provider == "local-learning"
+    assert "Removed topic **Linear Regression**" in del_t_reply
+
+    del_rm_reply, provider = app._handle_local_command(
+        "delete roadmap Machine Learning", "c1"
+    )
+    assert provider == "local-learning"
+    assert "Deleted learning roadmap **Machine Learning**" in del_rm_reply
+
+
+def test_learning_activity_and_nudges_commands(learning_db):
+    app._handle_local_command("start learning Java Basics", "c1")
+    act_reply, provider = app._handle_local_command("show learning activity", "c1")
+    assert provider == "local-learning"
+    assert "Java Basics" in act_reply
+
+    off_reply, provider = app._handle_local_command("disable learning nudges", "c1")
+    assert provider == "local-learning"
+    assert "disabled" in off_reply
+    assert not progress.get_nudges_enabled()
+
+    on_reply, provider = app._handle_local_command("enable learning nudges", "c1")
+    assert provider == "local-learning"
+    assert "enabled" in on_reply
+    assert progress.get_nudges_enabled()
+

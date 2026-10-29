@@ -4,8 +4,9 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "npm --prefix frontend run dev",
-    "build": "npm --prefix frontend run build && rm -rf dist && cp -r frontend/dist dist",
+    "postinstall": "npm --prefix frontend install",
+    "dev": "sh -c '[ -d frontend/node_modules ] || npm --prefix frontend install; exec npm --prefix frontend run dev'",
+    "build": "sh -c '[ -d frontend/node_modules ] || npm --prefix frontend install; npm --prefix frontend run build && rm -rf dist && cp -r frontend/dist dist'",
     "lint": "npm --prefix frontend run lint"
   }
 }

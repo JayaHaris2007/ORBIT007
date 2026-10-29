@@ -313,7 +313,7 @@ class DiscordVoiceManager:
                     f"Discord voice encryption error: {err_msg} "
                     f"(discord.py {discord.__version__}, davey {davey.__version__})"
                 )
-            return False, f"Could not join voice channel: {err_msg}"""
+            return False, f"Could not join voice channel: {err_msg}"
 
     async def join_call(
         self, message: discord.Message

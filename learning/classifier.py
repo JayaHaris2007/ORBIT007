@@ -22,11 +22,46 @@ import json
 import re
 import sqlite3
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from typing import Any, Callable
 
 import numpy
 
-from rapidfuzz import fuzz
+try:
+    from rapidfuzz import fuzz as _rf_fuzz
+    if not isinstance(_rf_fuzz.partial_ratio("a", "a"), (int, float)):
+        raise ImportError
+    fuzz = _rf_fuzz
+except Exception:
+    class _FallbackFuzz:
+        @staticmethod
+        def ratio(s1: str, s2: str) -> float:
+            if not s1 and not s2:
+                return 100.0
+            if not s1 or not s2:
+                return 0.0
+            return SequenceMatcher(None, s1, s2).ratio() * 100.0
+
+        @staticmethod
+        def partial_ratio(s1: str, s2: str) -> float:
+            if not s1 or not s2:
+                return 0.0
+            shorter, longer = (s1, s2) if len(s1) <= len(s2) else (s2, s1)
+            if shorter in longer:
+                return 100.0
+            m = SequenceMatcher(None, shorter, longer)
+            blocks = m.get_matching_blocks()
+            scores = [SequenceMatcher(None, shorter, longer).ratio() * 100.0]
+            k = len(shorter)
+            for b in blocks:
+                if b.size == 0:
+                    continue
+                start = max(0, b.b - b.a)
+                window = longer[start : start + k]
+                scores.append(SequenceMatcher(None, shorter, window).ratio() * 100.0)
+            return max(scores)
+
+    fuzz = _FallbackFuzz()  # type: ignore[assignment]
 
 from . import schema
 

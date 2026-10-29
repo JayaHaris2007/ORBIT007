@@ -2108,35 +2108,56 @@ def _page_for_provider(provider: str) -> str | None:
 
 
 _LEARNING_PROGRESS_PATTERN = re.compile(
-    r"^(?:(?:show|check|view)\s+(?:me\s+)?)?(?:my\s+)?learning\s+"
-    r"(?:progress|status|stats|summary)$"
-    r"|^learning\s+(?:progress|status)$"
-    r"|^how(?:'s| is)\s+my\s+learning\s+(?:going|progress)$",
+    r"^(?:(?:show|check|view|tell|give)\s+(?:me\s+)?)?(?:my\s+)?learning\s+"
+    r"(?:progress|status|stats|statistics|summary|overview)$"
+    r"|^learning\s+(?:progress|status|stats|summary)$"
+    r"|^how(?:'s| is)\s+my\s+learning\s+(?:going|progress|doing)$",
     re.IGNORECASE,
 )
 
 _LEARNING_NEXT_PATTERN = re.compile(
-    r"^what(?:\s+should|\s+can|\s+do)?\s+i\s+(?:learn|study|tackle)\s+next$"
-    r"|^what(?:'s| is)\s+next\s+(?:to\s+)?(?:learn|study)$"
-    r"|^(?:what(?:'s| is)\s+)?my\s+next\s+(?:topic|lesson)$"
-    r"|^next\s+topics?$",
+    r"^what(?:\s+should|\s+can|\s+do|\s+could|\s+shall)?\s+i\s+(?:learn|study|tackle|practice|master)\s+next$"
+    r"|^what(?:'s| is)\s+next\s+(?:to\s+|in\s+my\s+)?(?:learn|learning|study|studying)$"
+    r"|^(?:what(?:'s| is)\s+)?(?:my\s+|the\s+)?next\s+(?:learning\s+)?(?:topic|lesson|module|subject)s?(?:\s+to\s+(?:learn|study))?$"
+    r"|^(?:suggest|recommend)(?:\s+me)?\s+(?:a\s+|some\s+)?(?:learning\s+)?(?:topics?|something\s+to\s+(?:learn|study))(?:\s+next)?$",
     re.IGNORECASE,
 )
 
 _LEARNING_ROADMAP_PROGRESS_PATTERN = re.compile(
     r"^(?:check|show|view)\s+(?:me\s+)?(?:my\s+)?(?:the\s+)?"
     r"(?:(?:status|progress)\s+(?:of|for|in)\s+(.+)"
-    r"|(.+?)\s+(?:status|progress))$"
+    r"|(.+?)\s+(?:roadmap\s+)?(?:status|progress))$"
     r"|^what(?:'s| is)\s+(?:my\s+)?(?:the\s+)?"
     r"(?:status|progress)\s+(?:of|for|in)\s+(.+)$"
     r"|^how(?:'s| is)\s+(?:my\s+)?(.+?)\s+(?:going|progress)$",
     re.IGNORECASE,
 )
 
+_LEARNING_ROADMAP_TOPICS_PATTERN = re.compile(
+    r"^(?:(?:show|list|view|check|what(?:'s| is| are))\s+(?:me\s+)?)?"
+    r"(?:(?:all|the|my)\s+)*topics?\s+(?:in|for|under|from|of|inside)\s+(.+)$"
+    r"|^(?:show|list|view|inspect)\s+(?:me\s+)?(?:the\s+|my\s+)?(.+?)\s+(?:roadmap\s+)?topics$"
+    r"|^what(?:'s| is)\s+(?:inside|in)\s+(?:the\s+|my\s+)?(.+?)\s+roadmap$",
+    re.IGNORECASE,
+)
+
+_LEARNING_STATUS_LIST_PATTERN = re.compile(
+    r"^what\s+(?:topics?\s+)?am\s+i\s+(?:currently\s+)?(?:learning|studying)(?:\s+right\s+now|\s+now)?$"
+    r"|^(?:(?:show|list|view|check|what\s+are)\s+(?:me\s+)?)?(?:(?:my|the|all)\s+)*"
+    r"(?P<filter>in[\s\-]progress|active|current|currently\s+learning|completed|finished|learned|mastered|on[\s\-]hold|paused|not\s+started|unlocked)\s+"
+    r"(?:learning\s+)?topics?$"
+    r"|^(?:(?:show|list|view|check|what\s+are)\s+(?:me\s+)?)?(?:(?:my|the|all)\s+)*"
+    r"(?:learning\s+)?topics?\s+(?:that\s+are\s+|which\s+are\s+|i\s+have\s+|i've\s+)?"
+    r"(?P<filter2>in\s+progress|currently\s+learning|completed|finished|learned|mastered|on\s+hold|paused|not\s+started)$"
+    r"|^what\s+(?:topics?\s+)?have\s+i\s+(?P<filter3>learned|completed|mastered|finished)(?:\s+so\s+far)?$",
+    re.IGNORECASE,
+)
+
 _LEARNING_ROADMAP_NEXT_PATTERN = re.compile(
     r"^(?:check\s+)?what\s+"
     r"(?:(?:to\s+)?should\s+i|i\s+should|can\s+i|to)\s+"
-    r"(?:learn|study)(?:\s+next)?\s+(?:from|in|on)\s+(.+)$",
+    r"(?:learn|study)(?:\s+next)?\s+(?:from|in|on|for)\s+(.+)$"
+    r"|^what(?:'s| is)\s+next\s+(?:in|for|on)\s+(.+)$",
     re.IGNORECASE,
 )
 
@@ -2149,23 +2170,115 @@ _LEARNING_ROADMAP_TASK_PATTERN = re.compile(
 )
 
 _LEARNING_START_PATTERN = re.compile(
-    r"^(?:start|begin)\s+(?:learning|studying)\s+(.+)$",
+    r"^(?:start|begin|resume|continue)\s+(?:learning|studying|working\s+on|with\s+topic|topic)\s+(.+)$"
+    r"|^(?:start|begin|resume|continue)\s+(it|that|this|that\s+topic|this\s+topic|(?:the\s+)?(?:first|second|third|1st|2nd|3rd)(?:\s+one|\s+topic)?)$"
+    r"|^i(?:'ve| have|'m| am)?\s+(?:just\s+|now\s+)?(?:started|begun|learning|studying|working\s+on)\s+(?:learning\s+|studying\s+|the\s+topic\s+|topic\s+)?(.+)$"
+    r"|^mark\s+(.+?)\s+as\s+(?:learning|in\s+progress|studying|started)$",
     re.IGNORECASE,
 )
 
 _LEARNING_COMPLETE_PATTERN = re.compile(
-    r"^(?:complete|finish)\s+(?:the\s+)?(?:topic|learning\s+topic)\s+(.+)$"
-    r"|^mark\s+(.+?)\s+as\s+(?:learned|mastered)$",
+    r"^(?:complete|finish|master)\s+(?:the\s+)?(?:topic|learning\s+topic|lesson|module)\s+(.+)$"
+    r"|^mark\s+(?:(?:the\s+)?(?:topic|learning\s+topic)\s+)?(.+?)\s+(?:as\s+)?(?:learned|mastered|completed|done|finished)$",
     re.IGNORECASE,
 )
 
 _LEARNING_FINISHED_PATTERN = re.compile(
-    r"^i(?:'ve|'d| have| had| was| am|'m)?\s+"
-    r"(?:just\s+|already\s+|finally\s+)?"
+    r"^(?:now\s+)?i(?:'ve|'d| have| had| was| am|'m)?\s+"
+    r"(?:just\s+|already\s+|finally\s+|now\s+)?"
     r"(?:comp\w*|finis\w*ed|finis\w*ht|finish|learn(?:ed|t)|master\w*|done\s+with)\s+"
-    r"(?:learning\s+|the\s+topic\s+|with\s+)?(.+)$",
+    r"(?:learning\s+|studying\s+|the\s+topic\s+|topic\s+|with\s+)?(.+)$",
     re.IGNORECASE,
 )
+
+_LEARNING_HOLD_PATTERN = re.compile(
+    r"^(?:put|place|set|move)\s+(?:(?:the\s+)?(?:topic|learning\s+topic)\s+)?(.+?)\s+(?:on\s+hold|to\s+on\s+hold|as\s+on\s+hold)$"
+    r"|^(?:pause|postpone|hold|defer)\s+(?:learning\s+|studying\s+|(?:the\s+)?topic\s+)?(.+)$",
+    re.IGNORECASE,
+)
+
+_LEARNING_REOPEN_PATTERN = re.compile(
+    r"^(?:reopen|re-open|reset|redo|uncomplete|restart)\s+(?:learning\s+|studying\s+|(?:the\s+)?topic\s+)(.+)$"
+    r"|^mark\s+(?:(?:the\s+)?topic\s+)?(.+?)\s+as\s+(?:not\s+started|unlearned|incomplete)$",
+    re.IGNORECASE,
+)
+
+_LEARNING_ROADMAP_CREATE_PATTERN = re.compile(
+    r"^(?:create|add|start|make)\s+(?:a\s+)?(?:new\s+)?"
+    r"(?:(?P<cat>academic|technical|personal)\s+)?(?:learning\s+)?roadmap\s+"
+    r"(?:called\s+|named\s+|for\s+|on\s+)?(?P<name>.+?)"
+    r"(?:\s+in\s+(?P<cat2>academic|technical|personal)(?:\s+category)?)?$",
+    re.IGNORECASE,
+)
+
+_LEARNING_ROADMAP_DELETE_PATTERN = re.compile(
+    r"^(?:delete|remove|drop)\s+(?:the\s+|my\s+)?(?:learning\s+)?roadmap\s+(?:called\s+|named\s+)?(.+)$",
+    re.IGNORECASE,
+)
+
+_LEARNING_TOPIC_CREATE_PATTERN = re.compile(
+    r"^(?:add|create)\s+(?:a\s+)?(?:new\s+)?(?:learning\s+)?topic\s+"
+    r"(?:called\s+|named\s+)?(?P<topic>.+?)\s+(?:to|in|under|into|for)\s+"
+    r"(?:the\s+|my\s+)?(?P<roadmap>.+?)(?:\s+roadmap)?$",
+    re.IGNORECASE,
+)
+
+_LEARNING_TOPIC_DELETE_PATTERN = re.compile(
+    r"^(?:delete|remove|drop)\s+(?:the\s+|my\s+)?(?:learning\s+)?topic\s+(?:called\s+|named\s+)?(.+)$",
+    re.IGNORECASE,
+)
+
+_LEARNING_TOPIC_PRIORITY_PATTERN = re.compile(
+    r"^(?:set|change|update|make)\s+(?:the\s+)?(?:priority\s+of\s+)?(?:learning\s+)?topic\s+(.+?)\s+"
+    r"(?:priority\s+)?(?:to\s+|as\s+)?(high|medium|low|1|2|3)(?:\s+priority)?$",
+    re.IGNORECASE,
+)
+
+_LEARNING_LINKS_LIST_PATTERN = re.compile(
+    r"^(?:(?:show|list|view|check|what\s+are)\s+(?:me\s+)?)?"
+    r"(?:(?:my|the|all|pending|suggested)\s+)*"
+    r"(?:suggested\s+learning\s+links?|learning\s+links?|task[\s\-]topic\s+links?|topic\s+links?)$",
+    re.IGNORECASE,
+)
+
+_LEARNING_LINK_ACTION_PATTERN = re.compile(
+    r"^(?P<action>confirm|accept|approve|reject|dismiss|decline)\s+"
+    r"(?:(?P<all>all)\s+)?(?:(?:the|my|suggested)\s+)*(?:learning\s+|task[\s\-]topic\s+)?links?"
+    r"(?:\s+(?:for\s+|#)(?P<target>.+))?$",
+    re.IGNORECASE,
+)
+
+_LEARNING_ACTIVITY_PATTERN = re.compile(
+    r"^(?:(?:show|list|view|check|what\s+is)\s+(?:me\s+)?)?"
+    r"(?:(?:my|the|recent|latest)\s+)*"
+    r"(?:learning\s+activity|learning\s+activities|learning\s+history|learning\s+log|study\s+history|study\s+log)$",
+    re.IGNORECASE,
+)
+
+_LEARNING_NUDGES_PATTERN = re.compile(
+    r"^(?:(?P<enable>enable|turn\s+on|activate|unmute|resume)"
+    r"|(?P<disable>disable|turn\s+off|deactivate|mute|pause))"
+    r"\s+(?:my\s+|the\s+)?learning\s+(?:nudges?|reminders?|notifications?)$"
+    r"|^(?:learning\s+nudges?\s+(?P<state>on|off|status))$",
+    re.IGNORECASE,
+)
+
+_LEARNING_BARE_PATTERN = re.compile(
+    r"^(?:(?:show|check|view|list|what(?:'s| is| are))\s+(?:me\s+)?)?"
+    r"(?:(?:my|the|all|current)\s+)*"
+    r"(?:learning|learning\s+roadmaps?|roadmaps?|learning\s+tracker|study\s+plan|learning\s+goals?)$",
+    re.IGNORECASE,
+)
+
+_LEARNING_PRONOUNS = {
+    "it", "that", "this", "this one", "that one", "the one",
+    "the topic", "that topic", "this topic", "the lesson", "that lesson",
+    "the roadmap", "that roadmap", "this roadmap",
+    "first", "the first", "first one", "the first one", "first topic", "the first topic", "1st", "the 1st",
+    "second", "the second", "second one", "the second one", "second topic", "the second topic", "2nd", "the 2nd",
+    "third", "the third", "third one", "the third one", "third topic", "the third topic", "3rd", "the 3rd",
+    "both", "both of them", "them", "all", "all of them",
+}
 
 
 def _clean_topic_reference(reference: str) -> str:
@@ -2174,9 +2287,130 @@ def _clean_topic_reference(reference: str) -> str:
     Users often tack an instruction onto the confession, e.g. "i had completed
     HTML Fundamentals mark it done". The topic name is everything before that.
     """
-    return re.sub(
+    cleaned = re.sub(
         r"\s+(?:and\s+)?mark\s+\S.*$", "", reference, flags=re.IGNORECASE
     ).strip()
+    cleaned = re.sub(
+        r"\s+(?:in|from|under)\s+(?:my\s+|the\s+)?learning(?:\s+tracker|\s+roadmap)?$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).strip()
+    return cleaned.strip("\"'`?!.,;:")
+
+
+def _extract_learning_context(
+    chat_id: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], bool]:
+    """Return (mentioned_topics, mentioned_roadmaps, is_most_recent_learning) from recent assistant turns."""
+    if not chat_id or not learning_schema.is_initialized():
+        return [], [], False
+    messages = memory_store.get_messages(chat_id)
+    assistant_msgs = [
+        m["content"] for m in reversed(messages) if m.get("role") == "assistant"
+    ][:3]
+    if not assistant_msgs:
+        return [], [], False
+
+    all_topics = learning_progress.list_topics()
+    all_roadmaps = learning_progress.roadmap_summaries()
+
+    def _scan_msg(text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        lower_text = text.lower()
+        found_topics: list[tuple[int, dict[str, Any]]] = []
+        for topic in all_topics:
+            t_name = topic["name"].strip().lower()
+            pos = lower_text.find(t_name)
+            if pos != -1:
+                found_topics.append((pos, topic))
+        found_topics.sort(key=lambda pair: pair[0])
+
+        found_roadmaps: list[tuple[int, dict[str, Any]]] = []
+        for rm in all_roadmaps:
+            r_name = rm["name"].strip().lower()
+            pos = lower_text.find(r_name)
+            if pos != -1:
+                found_roadmaps.append((pos, rm))
+        found_roadmaps.sort(key=lambda pair: pair[0])
+        return [t for _, t in found_topics], [r for _, r in found_roadmaps]
+
+    most_recent_lower = assistant_msgs[0].lower()
+    most_recent_topics, most_recent_roadmaps = _scan_msg(assistant_msgs[0])
+    has_learning_cue = any(
+        cue in most_recent_lower
+        for cue in (
+            "ready to learn",
+            "roadmap",
+            "next-topic",
+            "in progress",
+            "what should i learn next",
+            "start learning",
+            "reopen learning",
+            "prerequisites",
+            "unlocked",
+            "learning link",
+            "learning tracker",
+        )
+    )
+    is_most_recent_learning = bool(
+        has_learning_cue or most_recent_topics or most_recent_roadmaps
+    ) and not bool(re.search(r"#\d+\b", assistant_msgs[0]))
+
+    for content in assistant_msgs:
+        topics, roadmaps = _scan_msg(content)
+        if topics or roadmaps:
+            return topics, roadmaps, is_most_recent_learning
+
+    return [], [], False
+
+
+def _resolve_topic_from_context_or_ref(
+    reference: str, chat_id: str
+) -> list[dict[str, Any]]:
+    """Return 1+ matching topics either from pronoun/ordinal context or by name/fuzzy lookup."""
+    cleaned = _clean_topic_reference(reference)
+    lowered = re.sub(r"\s+", " ", cleaned.lower()).strip()
+    if lowered in _LEARNING_PRONOUNS and chat_id:
+        ctx_topics, ctx_roadmaps, _ = _extract_learning_context(chat_id)
+        if not ctx_topics and ctx_roadmaps:
+            next_in_rm = learning_progress.next_topics(
+                limit=3, roadmap_id=ctx_roadmaps[0]["id"]
+            )
+            if next_in_rm:
+                found = learning_progress.find_topic(next_in_rm[0]["name"])
+                if found:
+                    ctx_topics = [found]
+        if ctx_topics:
+            if lowered in {"both", "both of them", "them", "all", "all of them"}:
+                return ctx_topics
+            ordinal = (
+                1
+                if ("second" in lowered or "2nd" in lowered)
+                else (2 if ("third" in lowered or "3rd" in lowered) else 0)
+            )
+            chosen = ctx_topics[ordinal] if ordinal < len(ctx_topics) else ctx_topics[0]
+            fresh = learning_progress.find_topic(chosen["name"])
+            return [fresh or chosen]
+    topic = learning_progress.find_topic(cleaned)
+    return [topic] if topic is not None else []
+
+
+def _resolve_roadmap_from_context_or_ref(
+    reference: str, chat_id: str
+) -> dict[str, Any] | None:
+    cleaned = reference.strip().strip("\"'`?!.,;:")
+    lowered = re.sub(r"\s+", " ", cleaned.lower()).strip()
+    if lowered in _LEARNING_PRONOUNS and chat_id:
+        _, ctx_roadmaps, _ = _extract_learning_context(chat_id)
+        if ctx_roadmaps:
+            ordinal = (
+                1
+                if ("second" in lowered or "2nd" in lowered)
+                else (2 if ("third" in lowered or "3rd" in lowered) else 0)
+            )
+            chosen = ctx_roadmaps[ordinal] if ordinal < len(ctx_roadmaps) else ctx_roadmaps[0]
+            return learning_progress.find_roadmap(chosen["name"]) or chosen
+    return learning_progress.find_roadmap(cleaned)
 
 
 def _learning_progress_reply() -> tuple[str, str]:
@@ -2203,8 +2437,10 @@ def _learning_progress_reply() -> tuple[str, str]:
     )
 
 
-def _learning_roadmap_progress_reply(reference: str) -> tuple[str, str]:
-    roadmap = learning_progress.find_roadmap(reference)
+def _learning_roadmap_progress_reply(
+    reference: str, chat_id: str = ""
+) -> tuple[str, str]:
+    roadmap = _resolve_roadmap_from_context_or_ref(reference, chat_id)
     if roadmap is None:
         return _learning_unknown_roadmap_reply(reference)
     reply = (
@@ -2220,6 +2456,74 @@ def _learning_roadmap_progress_reply(reference: str) -> tuple[str, str]:
     return reply, "local-learning"
 
 
+def _learning_roadmap_topics_reply(
+    reference: str, chat_id: str = ""
+) -> tuple[str, str]:
+    roadmap = _resolve_roadmap_from_context_or_ref(reference, chat_id)
+    if roadmap is None:
+        return _learning_unknown_roadmap_reply(reference)
+    detail = learning_progress.get_roadmap(roadmap["id"])
+    topics = (detail or {}).get("topics") or []
+    if not topics:
+        return (
+            f"**{roadmap['name']}** doesn't have any topics yet. "
+            f"Say 'add topic <name> to {roadmap['name']}' to add one.",
+            "local-learning",
+        )
+    status_badges = {
+        "completed": "✅ Completed",
+        "learning": "🔄 In progress",
+        "on_hold": "⏸️ On hold",
+        "not_started": "🔓 Ready",
+    }
+    lines = []
+    for t in topics:
+        if t["status"] == "not_started" and not t.get("available", True):
+            prereqs = ", ".join(t.get("unmet_prerequisites") or [])
+            badge = f"🔒 Locked (needs {prereqs})"
+        else:
+            badge = status_badges.get(t["status"], t["status"])
+        lines.append(f"- **{t['name']}** — {badge}")
+    return (
+        f"Topics in **{roadmap['name']}** ({roadmap['completed_count']}/{roadmap['topic_count']} completed):\n"
+        + "\n".join(lines),
+        "local-learning",
+    )
+
+
+def _learning_status_topics_reply(raw_filter: str) -> tuple[str, str]:
+    norm = re.sub(r"[\s\-]+", " ", raw_filter.strip().lower())
+    if norm in {"in progress", "active", "current", "currently learning", "learning", "studying"}:
+        status = "learning"
+        label = "currently in progress"
+        empty_msg = "You don't have any learning topics in progress right now. Say 'what should I learn next' to pick one!"
+    elif norm in {"completed", "finished", "learned", "mastered"}:
+        status = "completed"
+        label = "completed"
+        empty_msg = "You haven't marked any learning topics completed yet."
+    elif norm in {"on hold", "paused"}:
+        status = "on_hold"
+        label = "on hold"
+        empty_msg = "You don't have any learning topics on hold."
+    else:
+        status = "not_started"
+        label = "not started"
+        empty_msg = "All topics are either in progress or completed!"
+
+    items = learning_progress.list_topics(status=status)
+    if not items:
+        return (empty_msg, "local-learning")
+    lines = [
+        f"- **{item['name']}** ({item['roadmap_name']})"
+        for item in items
+    ]
+    return (
+        f"Here are your learning topics **{label}** ({len(items)}):\n"
+        + "\n".join(lines),
+        "local-learning",
+    )
+
+
 def _learning_unknown_roadmap_reply(reference: str) -> tuple[str, str]:
     names = ", ".join(
         item["name"] for item in learning_progress.roadmap_summaries()
@@ -2231,11 +2535,14 @@ def _learning_unknown_roadmap_reply(reference: str) -> tuple[str, str]:
 
 
 def _learning_next_reply(
-    roadmap_reference: str | None = None, *, suggest_task: bool = False
+    roadmap_reference: str | None = None,
+    *,
+    suggest_task: bool = False,
+    chat_id: str = "",
 ) -> tuple[str, str]:
     roadmap = None
     if roadmap_reference:
-        roadmap = learning_progress.find_roadmap(roadmap_reference)
+        roadmap = _resolve_roadmap_from_context_or_ref(roadmap_reference, chat_id)
         if roadmap is None:
             return _learning_unknown_roadmap_reply(roadmap_reference)
     items = learning_progress.next_topics(
@@ -2271,10 +2578,13 @@ def _learning_next_reply(
     )
 
 
-def _learning_start_reply(reference: str, name: str = "") -> tuple[str, str]:
-    topic = learning_progress.find_topic(_clean_topic_reference(reference))
-    if topic is None:
+def _learning_start_reply(
+    reference: str, name: str = "", chat_id: str = ""
+) -> tuple[str, str]:
+    topics = _resolve_topic_from_context_or_ref(reference, chat_id)
+    if not topics:
         raise ValueError(f"No topic matched '{reference}'.")
+    topic = topics[0]
     if topic["status"] == "completed":
         return (
             f"**{topic['name']}** is already completed — say 'reopen "
@@ -2302,10 +2612,23 @@ def _learning_start_reply(reference: str, name: str = "") -> tuple[str, str]:
     )
 
 
-def _learning_complete_reply(reference: str, name: str = "") -> tuple[str, str]:
-    topic = learning_progress.find_topic(_clean_topic_reference(reference))
-    if topic is None:
+def _learning_complete_reply(
+    reference: str, name: str = "", chat_id: str = ""
+) -> tuple[str, str]:
+    topics = _resolve_topic_from_context_or_ref(reference, chat_id)
+    if not topics:
         raise ValueError(f"No topic matched '{reference}'.")
+    if len(topics) > 1:
+        names = []
+        for t in topics:
+            learning_progress.set_topic_status(t["id"], "completed")
+            names.append(f"**{t['name']}**")
+        return (
+            f"Nice work — marked {', '.join(names)} as completed. "
+            "Say 'what should I learn next' to keep rolling.",
+            "local-learning",
+        )
+    topic = topics[0]
     if topic["status"] == "completed":
         return (
             f"**{topic['name']}** was already marked completed.",
@@ -2320,15 +2643,38 @@ def _learning_complete_reply(reference: str, name: str = "") -> tuple[str, str]:
     )
 
 
-_LEARNING_BARE_PATTERN = re.compile(
-    r"^(?:(?:show|check|view|list|what(?:'s| is| are))\s+(?:me\s+)?)?"
-    r"(?:(?:my|the|all|current)\s+)*"
-    r"(?:learning|learning\s+roadmaps?|roadmaps?|learning\s+tracker|study\s+plan|learning\s+goals?)$",
-    re.IGNORECASE,
-)
+def _learning_hold_reply(
+    reference: str, chat_id: str = ""
+) -> tuple[str, str]:
+    topics = _resolve_topic_from_context_or_ref(reference, chat_id)
+    if not topics:
+        raise ValueError(f"No topic matched '{reference}'.")
+    topic = topics[0]
+    learning_progress.set_topic_status(topic["id"], "on_hold")
+    return (
+        f"Put **{topic['name']}** on hold. Say 'start learning {topic['name']}' "
+        "whenever you're ready to pick it back up.",
+        "local-learning",
+    )
 
 
-def _learning_command(prompt: str, name: str = "") -> tuple[str, str] | None:
+def _learning_reopen_reply(
+    reference: str, chat_id: str = ""
+) -> tuple[str, str]:
+    topics = _resolve_topic_from_context_or_ref(reference, chat_id)
+    if not topics:
+        raise ValueError(f"No topic matched '{reference}'.")
+    topic = topics[0]
+    learning_progress.set_topic_status(topic["id"], "not_started")
+    return (
+        f"Reopened **{topic['name']}** and reset its status to not started.",
+        "local-learning",
+    )
+
+
+def _learning_command(
+    prompt: str, name: str = "", chat_id: str = ""
+) -> tuple[str, str] | None:
     """Handle learning tracker commands; requires the schema to be ready."""
     if not learning_schema.is_initialized():
         return None
@@ -2336,28 +2682,202 @@ def _learning_command(prompt: str, name: str = "") -> tuple[str, str] | None:
     if _LEARNING_PROGRESS_PATTERN.fullmatch(normalized) or _LEARNING_BARE_PATTERN.fullmatch(normalized):
         return _learning_progress_reply()
     if _LEARNING_NEXT_PATTERN.fullmatch(normalized):
-        return _learning_next_reply()
+        return _learning_next_reply(chat_id=chat_id)
+
+    # Learning activity log
+    if _LEARNING_ACTIVITY_PATTERN.fullmatch(normalized):
+        activities = learning_progress.list_activities(limit=8)
+        if not activities:
+            return ("No learning activity recorded yet. Start a topic to log your progress!", "local-learning")
+        lines = [
+            f"- **{a['topic_name']}** ({a['roadmap_name']}): {a['kind']}"
+            + (f" via task *{a['task_title']}*" if a.get("task_title") else "")
+            for a in activities
+        ]
+        return ("Recent learning activity:\n" + "\n".join(lines), "local-learning")
+
+    # Learning nudges toggle / status
+    nudges_match = _LEARNING_NUDGES_PATTERN.fullmatch(normalized)
+    if nudges_match:
+        state_word = (nudges_match.group("state") or "").lower()
+        if state_word == "status":
+            enabled = learning_progress.get_nudges_enabled()
+            return (
+                f"Learning nudges are currently **{'enabled' if enabled else 'disabled'}**.",
+                "local-learning",
+            )
+        enable = bool(nudges_match.group("enable")) or state_word == "on"
+        learning_progress.set_nudges_enabled(enable)
+        return (
+            f"Learning nudges are now **{'enabled' if enable else 'disabled'}**.",
+            "local-learning",
+        )
+
+    # Suggested task-topic links list & confirmation
+    if _LEARNING_LINKS_LIST_PATTERN.fullmatch(normalized):
+        links = learning_progress.list_suggested_links()
+        if not links:
+            return ("You don't have any pending suggested task-topic links right now.", "local-learning")
+        lines = [
+            f"- Link #{l['id']}: Task **{l['task_title']}** → Topic **{l['topic_name']}** ({l['roadmap_name']})"
+            for l in links[:10]
+        ]
+        return (
+            "Suggested task-topic learning links:\n"
+            + "\n".join(lines)
+            + "\n\nSay 'confirm learning link' or 'reject learning link' to manage them.",
+            "local-learning",
+        )
+
+    link_act = _LEARNING_LINK_ACTION_PATTERN.fullmatch(normalized)
+    if link_act:
+        action = link_act.group("action").lower()
+        new_state = "confirmed" if action in {"confirm", "accept", "approve"} else "rejected"
+        links = learning_progress.list_suggested_links()
+        if not links:
+            return ("There are no pending suggested learning links right now.", "local-learning")
+        target_str = (link_act.group("target") or "").strip()
+        if link_act.group("all"):
+            for l in links:
+                learning_progress.update_task_link(l["id"], new_state)
+            return (
+                f"{new_state.capitalize()} all {len(links)} suggested learning links.",
+                "local-learning",
+            )
+        chosen = links[0]
+        if target_str:
+            if target_str.isdigit():
+                lid = int(target_str)
+                chosen = next((l for l in links if l["id"] == lid), chosen)
+            else:
+                t_low = target_str.lower()
+                chosen = next(
+                    (
+                        l for l in links
+                        if t_low in l["topic_name"].lower() or t_low in l["task_title"].lower()
+                    ),
+                    chosen,
+                )
+        learning_progress.update_task_link(chosen["id"], new_state)
+        return (
+            f"{new_state.capitalize()} link between task **{chosen['task_title']}** and topic **{chosen['topic_name']}**.",
+            "local-learning",
+        )
+
+    # Create / delete roadmap
+    rm_create = _LEARNING_ROADMAP_CREATE_PATTERN.fullmatch(normalized)
+    if rm_create:
+        rm_name = rm_create.group("name").strip(" \"'")
+        cat = (rm_create.group("cat") or rm_create.group("cat2") or "technical").lower()
+        created = learning_progress.create_roadmap(rm_name, category=cat)
+        return (
+            f"Created **{created['category']}** learning roadmap **{created['name']}**. "
+            f"Say 'add topic <name> to {created['name']}' to add topics.",
+            "local-learning",
+        )
+
+    rm_delete = _LEARNING_ROADMAP_DELETE_PATTERN.fullmatch(normalized)
+    if rm_delete:
+        ref = rm_delete.group(1).strip()
+        roadmap = _resolve_roadmap_from_context_or_ref(ref, chat_id)
+        if roadmap is None:
+            return _learning_unknown_roadmap_reply(ref)
+        learning_progress.delete_roadmap(roadmap["id"])
+        return (f"Deleted learning roadmap **{roadmap['name']}**.", "local-learning")
+
+    # Create / delete / reprioritize topic
+    t_create = _LEARNING_TOPIC_CREATE_PATTERN.fullmatch(normalized)
+    if t_create:
+        t_name = t_create.group("topic").strip(" \"'")
+        rm_ref = t_create.group("roadmap").strip(" \"'")
+        roadmap = _resolve_roadmap_from_context_or_ref(rm_ref, chat_id)
+        if roadmap is None:
+            return _learning_unknown_roadmap_reply(rm_ref)
+        created = learning_progress.create_topic(roadmap["id"], t_name)
+        return (
+            f"Added topic **{created['name']}** to **{roadmap['name']}**.",
+            "local-learning",
+        )
+
+    t_delete = _LEARNING_TOPIC_DELETE_PATTERN.fullmatch(normalized)
+    if t_delete:
+        ref = t_delete.group(1).strip()
+        topics = _resolve_topic_from_context_or_ref(ref, chat_id)
+        if not topics:
+            raise ValueError(f"No topic matched '{ref}'.")
+        topic = topics[0]
+        learning_progress.delete_topic(topic["id"])
+        return (f"Removed topic **{topic['name']}**.", "local-learning")
+
+    t_prio = _LEARNING_TOPIC_PRIORITY_PATTERN.fullmatch(normalized)
+    if t_prio:
+        ref = t_prio.group(1).strip()
+        prio_raw = t_prio.group(2).lower()
+        prio_map = {"low": 1, "1": 1, "medium": 2, "2": 2, "high": 3, "3": 3}
+        prio_label = {1: "low", 2: "medium", 3: "high"}
+        prio_val = prio_map[prio_raw]
+        topics = _resolve_topic_from_context_or_ref(ref, chat_id)
+        if not topics:
+            raise ValueError(f"No topic matched '{ref}'.")
+        updated = learning_progress.update_topic(topics[0]["id"], priority=prio_val)
+        return (
+            f"Updated **{updated['name']}** priority to **{prio_label[prio_val]}**.",
+            "local-learning",
+        )
+
+    # Filter topics by status ("what am I currently learning", "completed topics", "topics on hold")
+    status_match = _LEARNING_STATUS_LIST_PATTERN.fullmatch(normalized)
+    if status_match:
+        raw_filter = (
+            status_match.group("filter")
+            or status_match.group("filter2")
+            or status_match.group("filter3")
+            or "learning"
+        )
+        return _learning_status_topics_reply(raw_filter)
+
+    # List topics in a specific roadmap
+    rm_topics_match = _LEARNING_ROADMAP_TOPICS_PATTERN.fullmatch(normalized)
+    if rm_topics_match:
+        reference = next(group for group in rm_topics_match.groups() if group)
+        return _learning_roadmap_topics_reply(reference.strip(), chat_id=chat_id)
+
     match = _LEARNING_ROADMAP_PROGRESS_PATTERN.fullmatch(normalized)
     if match:
         reference = next(group for group in match.groups() if group)
-        return _learning_roadmap_progress_reply(reference.strip())
+        return _learning_roadmap_progress_reply(reference.strip(), chat_id=chat_id)
     match = _LEARNING_ROADMAP_TASK_PATTERN.fullmatch(normalized)
     if match:
         reference = next(group for group in match.groups() if group)
-        return _learning_next_reply(reference.strip(), suggest_task=True)
+        return _learning_next_reply(reference.strip(), suggest_task=True, chat_id=chat_id)
     match = _LEARNING_ROADMAP_NEXT_PATTERN.fullmatch(normalized)
     if match:
-        return _learning_next_reply(match.group(1).strip())
+        reference = next(group for group in match.groups() if group)
+        return _learning_next_reply(reference.strip(), chat_id=chat_id)
+
+    # Pause / On hold
+    hold_match = _LEARNING_HOLD_PATTERN.fullmatch(normalized)
+    if hold_match:
+        reference = next(group for group in hold_match.groups() if group)
+        return _learning_hold_reply(reference.strip(), chat_id=chat_id)
+
+    # Reopen / Reset
+    reopen_match = _LEARNING_REOPEN_PATTERN.fullmatch(normalized)
+    if reopen_match:
+        reference = next(group for group in reopen_match.groups() if group)
+        return _learning_reopen_reply(reference.strip(), chat_id=chat_id)
+
     match = _LEARNING_START_PATTERN.fullmatch(normalized)
     if match:
-        return _learning_start_reply(match.group(1).strip(), name=name)
+        reference = next(group for group in match.groups() if group)
+        return _learning_start_reply(reference.strip(), name=name, chat_id=chat_id)
     match = _LEARNING_COMPLETE_PATTERN.fullmatch(normalized)
     if match:
         reference = next(group for group in match.groups() if group)
-        return _learning_complete_reply(reference.strip(), name=name)
+        return _learning_complete_reply(reference.strip(), name=name, chat_id=chat_id)
     match = _LEARNING_FINISHED_PATTERN.fullmatch(normalized)
     if match:
-        return _learning_complete_reply(match.group(1).strip(), name=name)
+        return _learning_complete_reply(match.group(1).strip(), name=name, chat_id=chat_id)
     return None
 
 
@@ -2430,6 +2950,7 @@ def _memory_command(prompt: str) -> tuple[str, str] | None:
 _PRONOUN_TARGETS = {
     "it", "that", "this", "this one", "that one", "the one",
     "the task", "the habit", "that task", "that habit", "this task", "this habit",
+    "the topic", "that topic", "this topic",
     "first", "the first", "first one", "the first one", "1st", "the 1st",
     "second", "the second", "second one", "the second one", "2nd", "the 2nd",
     "third", "the third", "third one", "the third one", "3rd", "the 3rd",
@@ -2502,6 +3023,11 @@ def _resolve_contextual_completion(
     if cleaned not in _PRONOUN_TARGETS:
         return None
 
+    # Check if the most recent assistant message was about learning topics
+    ctx_topics, _, is_recent_learning = _extract_learning_context(chat_id)
+    if (is_recent_learning or "topic" in cleaned) and ctx_topics and "task" not in cleaned and "habit" not in cleaned:
+        return _learning_complete_reply(cleaned, name=name, chat_id=chat_id)
+
     all_habits = memory_store.list_habits()
     pending_tasks = memory_store.list_tasks(include_completed=False)
     today = datetime.now(LOCAL_TIMEZONE).date().isoformat()
@@ -2550,6 +3076,8 @@ def _resolve_contextual_completion(
                 "Checked off: " + ", ".join(f"**{h['name']}**" for h in ctx_habits) + ".",
                 "local-habit-manager",
             )
+        if ctx_topics:
+            return _learning_complete_reply(cleaned, name=name, chat_id=chat_id)
 
     ordinal = 0
     if "second" in cleaned or "2nd" in cleaned:
@@ -2565,11 +3093,14 @@ def _resolve_contextual_completion(
         chosen = ctx_habits[ordinal] if ordinal < len(ctx_habits) else ctx_habits[0]
         return (_complete_habit(chosen, name=name), "local-habit-manager")
 
+    if ctx_topics and "task" not in cleaned and "habit" not in cleaned:
+        return _learning_complete_reply(cleaned, name=name, chat_id=chat_id)
+
     # Fallback: if there is globally only 1 pending task, complete it
-    if len(pending_tasks) == 1 and ("habit" not in cleaned):
+    if len(pending_tasks) == 1 and ("habit" not in cleaned) and ("topic" not in cleaned):
         return (_complete_task(pending_tasks[0], name=name), "local-task-manager")
 
-    if len(pending_habits) == 1 and ("task" not in cleaned):
+    if len(pending_habits) == 1 and ("task" not in cleaned) and ("topic" not in cleaned):
         return (_complete_habit(pending_habits[0], name=name), "local-habit-manager")
 
     return None
@@ -2580,11 +3111,12 @@ def _resolve_contextual_mutation(
 ) -> tuple[str, str] | None:
     """Handle contextual 'delete it', 'make it high priority', 'undo it', or 'reopen it'."""
     normalized = _normalize_command(prompt).lower()
+    ctx_topics, _, is_recent_learning = _extract_learning_context(chat_id)
 
     # 1. Contextual Delete: "delete it", "remove that", "delete the first one"
     del_match = re.fullmatch(
         r"(?:delete|remove|drop|cancel)\s+"
-        r"(it|that|this|that\s+one|this\s+one|the\s+task|the\s+habit|"
+        r"(it|that|this|that\s+one|this\s+one|the\s+task|the\s+habit|the\s+topic|that\s+topic|"
         r"(?:the\s+)?(?:first|second|third|1st|2nd|3rd)(?:\s+one)?)",
         normalized,
         re.IGNORECASE,
@@ -2592,6 +3124,10 @@ def _resolve_contextual_mutation(
     if del_match:
         target_ref = del_match.group(1)
         ordinal = 1 if ("second" in target_ref or "2nd" in target_ref) else (2 if ("third" in target_ref or "3rd" in target_ref) else 0)
+        if (is_recent_learning or "topic" in target_ref) and ctx_topics and "task" not in target_ref and "habit" not in target_ref:
+            chosen_t = ctx_topics[ordinal] if ordinal < len(ctx_topics) else ctx_topics[0]
+            learning_progress.delete_topic(chosen_t["id"])
+            return (f"Removed topic **{chosen_t['name']}**.", "local-learning")
         ctx_tasks, ctx_habits = _extract_context_entities(chat_id)
         if ctx_tasks and "habit" not in target_ref:
             chosen = ctx_tasks[ordinal] if ordinal < len(ctx_tasks) else ctx_tasks[0]
@@ -2606,13 +3142,17 @@ def _resolve_contextual_mutation(
     # 2. Contextual Priority Update: "make it high priority", "set its priority to low"
     prio_match = re.fullmatch(
         r"(?:make|set|change|update)\s+"
-        r"(?:it|that|this|its\s+priority|the\s+priority|the\s+task)\s+"
+        r"(?:it|that|this|its\s+priority|the\s+priority|the\s+task|the\s+topic)\s+"
         r"(?:to\s+)?(?:be\s+)?(?:priority\s+)?(low|medium|high)(?:\s+priority)?",
         normalized,
         re.IGNORECASE,
     )
     if prio_match:
         new_prio = prio_match.group(1).lower()
+        if (is_recent_learning or "topic" in normalized) and ctx_topics and "task" not in normalized:
+            prio_val = {"low": 1, "medium": 2, "high": 3}[new_prio]
+            updated_t = learning_progress.update_topic(ctx_topics[0]["id"], priority=prio_val)
+            return (f"Updated **{updated_t['name']}** priority to **{new_prio}**.", "local-learning")
         ctx_tasks, _ = _extract_context_entities(chat_id)
         if ctx_tasks:
             chosen = ctx_tasks[0]
@@ -2621,13 +3161,15 @@ def _resolve_contextual_mutation(
 
     # 3. Contextual Undo / Reopen / Uncheck: "undo it", "uncheck it", "reopen it", "mark it not done"
     undo_match = re.fullmatch(
-        r"(?:undo|uncheck|un-check|reopen|re-open|uncomplete)\s+"
-        r"(it|that|this|the\s+task|the\s+habit)"
-        r"|mark\s+(it|that|this)\s+(?:as\s+)?(?:not\s+done|not\s+completed|incomplete|open|pending)",
+        r"(?:undo|uncheck|un-check|reopen|re-open|uncomplete|reset)\s+"
+        r"(it|that|this|the\s+task|the\s+habit|the\s+topic|that\s+topic)"
+        r"|mark\s+(it|that|this)\s+(?:as\s+)?(?:not\s+done|not\s+completed|not\s+started|incomplete|open|pending)",
         normalized,
         re.IGNORECASE,
     )
     if undo_match:
+        if (is_recent_learning or "topic" in normalized) and ctx_topics and "task" not in normalized and "habit" not in normalized:
+            return _learning_reopen_reply("it", chat_id=chat_id)
         ctx_tasks, ctx_habits = _extract_context_entities(chat_id)
         if ctx_tasks:
             chosen = ctx_tasks[0]
@@ -3054,9 +3596,18 @@ def _handle_local_command(prompt: str, chat_id: str) -> tuple[str, str] | None:
             return (_complete_task(completed_task, name=name), "local-task-manager")
         # No task or habit matched — let learning commands have a look.
 
-    learning_command = _learning_command(prompt, name=name)
+    learning_command = _learning_command(prompt, name=name, chat_id=chat_id)
     if learning_command is not None:
         return learning_command
+
+    if completion_target is not None and learning_schema.is_initialized():
+        matched_topic = learning_progress.find_topic(
+            _clean_topic_reference(completion_target)
+        )
+        if matched_topic is not None:
+            return _learning_complete_reply(
+                completion_target, name=name, chat_id=chat_id
+            )
 
     web_query = _parse_web_search_query(prompt)
     if web_query:
