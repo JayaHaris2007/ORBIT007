@@ -1,10 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useAppData } from '../context/AppDataContext';
 import { habitService } from '../services/habitService';
 import { taskService } from '../services/taskService';
+import { learningService } from '../services/learningService';
 import { format } from 'date-fns';
 import { Zap, CheckCircle, Target, Focus, Trophy } from 'lucide-react';
+import { motion } from 'framer-motion';
 import HabitCard from '../components/HabitCard';
 import TaskCard from '../components/TaskCard';
 import CircularProgress from '../components/CircularProgress';
@@ -14,12 +16,34 @@ import HabitWidget from '../components/HabitWidget';
 import TodoWidget from '../components/TodoWidget';
 import LearningWidget from '../components/LearningWidget';
 import TaskEditor from '../components/TaskEditor';
+import AssistantEntryBriefing from '../components/AssistantEntryBriefing';
+
+const STAGGER_CONTAINER = {
+    hidden: { opacity: 0 },
+    show: {
+        opacity: 1,
+        transition: {
+            staggerChildren: 0.08,
+        },
+    },
+};
+
+const STAGGER_ITEM = {
+    hidden: { opacity: 0, y: 16 },
+    show: {
+        opacity: 1,
+        y: 0,
+        transition: { duration: 0.42, ease: [0.16, 1, 0.3, 1] },
+    },
+};
 
 const Dashboard = () => {
     const { currentUser } = useAuth();
     const { revision } = useAppData();
     const [habits, setHabits] = useState([]);
     const [tasks, setTasks] = useState([]);
+    const [learningProgress, setLearningProgress] = useState(null);
+    const [nextTopics, setNextTopics] = useState([]);
     const [editingTask, setEditingTask] = useState(null);
     const [focusMode, setFocusMode] = useState(false);
     const [loading, setLoading] = useState(true);
@@ -35,20 +59,32 @@ const Dashboard = () => {
         message: ''
     });
 
+    const loadDashboardData = useCallback(async () => {
+        try {
+            const [habitData, taskData, gamification, progressData, nextData] = await Promise.all([
+                habitService.getHabits(),
+                taskService.getTasks(true),
+                habitService.getGamification(),
+                learningService.getProgress().catch(() => null),
+                learningService.getNext().catch(() => []),
+            ]);
+            setHabits(habitData);
+            setTasks(taskData);
+            setUserData(gamification);
+            setLearningProgress(progressData);
+            setNextTopics(nextData || []);
+        } catch (error) {
+            console.error('Error loading dashboard:', error);
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
     useEffect(() => {
         if (currentUser) {
-            Promise.all([habitService.getHabits(), taskService.getTasks(true), habitService.getGamification()])
-                .then(([habitData, taskData, gamification]) => {
-                setHabits(habitData);
-                setTasks(taskData);
-                setUserData(gamification);
-                setLoading(false);
-            }).catch((error) => {
-                console.error('Error loading dashboard:', error);
-                setLoading(false);
-            });
+            loadDashboardData();
         }
-    }, [currentUser, revision]);
+    }, [currentUser, revision, loadDashboardData]);
 
     // Derived Stats
     const today = format(new Date(), 'yyyy-MM-dd');
@@ -89,6 +125,21 @@ const Dashboard = () => {
         }
     };
 
+    const handleQuickStartTopic = async (topic) => {
+        if (!topic?.topicId) return;
+        try {
+            await learningService.updateTopic(topic.topicId, { status: 'learning' });
+            const [progressData, nextData] = await Promise.all([
+                learningService.getProgress().catch(() => null),
+                learningService.getNext().catch(() => []),
+            ]);
+            setLearningProgress(progressData);
+            setNextTopics(nextData || []);
+        } catch (error) {
+            console.error(error);
+        }
+    };
+
     const confirmDelete = async () => {
         const { type, id } = deleteConfig;
         if (!id) return;
@@ -122,20 +173,25 @@ const Dashboard = () => {
     if (loading) return <div className="p-10 text-center text-textMuted animate-pulse">Getting everything ready...</div>;
 
     return (
-        <div className="space-y-8 pb-20">
-            <header className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
+        <motion.div
+            variants={STAGGER_CONTAINER}
+            initial="hidden"
+            animate="show"
+            className="space-y-8 pb-20"
+        >
+            <motion.header variants={STAGGER_ITEM} className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                 <div>
                     <h1 className="text-3xl font-bold text-white tracking-widest uppercase glow-white">
-                        {focusMode ? 'Focus time' : `Hello, ${currentUser?.displayName?.split(' ')[0]}`}
+                        {focusMode ? 'Focus time' : 'Command Center'}
                     </h1>
                     <p className="text-textMuted text-sm font-mono tracking-wide mt-1">
-                        {focusMode ? 'Silence the noise.' : format(new Date(), 'EEEE, MMMM do')}
+                        {focusMode ? 'Silence the noise.' : `${format(new Date(), 'EEEE, MMMM do')} · ${pendingTasks.length} ${pendingTasks.length === 1 ? 'task' : 'tasks'} remaining`}
                     </p>
                 </div>
 
                 <button
                     onClick={() => setFocusMode(!focusMode)}
-                    className={`px-6 py-2 rounded-full flex items-center space-x-2 transition-all border ${focusMode
+                    className={`px-6 py-2 rounded-xl flex items-center space-x-2 transition-all border ${focusMode
                         ? 'bg-white text-black border-white shadow-[0_0_15px_rgba(255,255,255,0.2)]'
                         : 'bg-transparent border-white/10 text-textMuted hover:text-white hover:border-white/30'
                         }`}
@@ -143,18 +199,36 @@ const Dashboard = () => {
                     <Focus size={18} />
                     <span className="uppercase text-xs font-bold tracking-wider">{focusMode ? 'Back to dashboard' : 'Focus time'}</span>
                 </button>
-            </header>
+            </motion.header>
 
-            {!focusMode && <AnimeQuote />}
+            {/* S.P.I.D.E.Y. Time-Based Entry Greeting, Remaining Workload & Where-To-Start Command Deck */}
+            <motion.div variants={STAGGER_ITEM}>
+                <AssistantEntryBriefing
+                    tasks={tasks}
+                    habits={habits}
+                    nextTopics={nextTopics}
+                    progress={learningProgress}
+                    userName={currentUser?.displayName || 'Shadow Hunter'}
+                    onQuickCompleteTask={(taskId) => handleToggleTask(taskId, true)}
+                    onQuickToggleHabit={handleToggleHabit}
+                    onQuickStartTopic={handleQuickStartTopic}
+                />
+            </motion.div>
 
             {!focusMode && (
-                <div className="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-4 gap-6">
+                <motion.div variants={STAGGER_ITEM}>
+                    <AnimeQuote />
+                </motion.div>
+            )}
+
+            {!focusMode && (
+                <motion.div variants={STAGGER_ITEM} className="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-4 gap-6">
                     {/* Progress Card */}
                     <div className="glass-card flex flex-col items-center justify-center p-6 space-y-4 relative overflow-hidden">
                         <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-transparent pointer-events-none" />
                         <h3 className="text-xs font-bold uppercase tracking-widest text-textMuted self-start w-full mb-2">Today&apos;s progress</h3>
                         <CircularProgress value={completedHabitsCount} max={totalHabitsCount || 1} />
-                        <div className="text-xs text-textMuted text-center font-mono">
+                        <div className="text-xs text-textMuted text-center font-mono tabular-nums">
                             {completedHabitsCount} / {totalHabitsCount} habits completed
                         </div>
                     </div>
@@ -235,12 +309,11 @@ const Dashboard = () => {
                             )) : <span className="text-xs text-textMuted">Your first achievement is waiting.</span>}
                         </div>
                     </div>
-                </div>
-
+                </motion.div>
             )}
 
             {/* Phone Widgets Section - New */}
-            <section>
+            <motion.section variants={STAGGER_ITEM}>
                 <h2 className="text-lg font-bold flex items-center space-x-2 text-white/90 uppercase tracking-widest mb-4">
                     <span>How you&apos;re doing</span>
                 </h2>
@@ -253,10 +326,10 @@ const Dashboard = () => {
                     />
                     <LearningWidget />
                 </div>
-            </section>
+            </motion.section>
 
             {/* Main Content Area */}
-            <div className="grid grid-cols-1 items-start gap-8 md:grid-cols-2 2xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_320px]">
+            <motion.div variants={STAGGER_ITEM} className="grid grid-cols-1 items-start gap-8 md:grid-cols-2 2xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_320px]">
 
                 {/* Habits Section */}
                 <section className="space-y-4">
@@ -321,7 +394,7 @@ const Dashboard = () => {
                         onCancel={() => setEditingTask(null)}
                     />
                 </div>
-            </div>
+            </motion.div>
 
             {/* Confirmation Modal */}
             <ConfirmationModal
@@ -331,7 +404,7 @@ const Dashboard = () => {
                 title={deleteConfig.title}
                 message={deleteConfig.message}
             />
-        </div >
+        </motion.div>
     );
 };
 

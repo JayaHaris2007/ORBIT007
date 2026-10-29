@@ -226,3 +226,93 @@ button:active:not(:disabled) { transform: translateY(1px); }
   html.spidey-minimized .workspace-sidebar { transform: translateX(102%); }
   html.spidey-minimized .workspace-toggle { display: flex; }
 }
+
+/* 3D Parallax & Opening Choreography System */
+.spidey-parallax-stage {
+  --app-px: 0px;
+  --app-py: 0px;
+  --app-scroll-y: 0px;
+}
+
+.spidey-stage-grid,
+.spidey-parallax-grid,
+.spidey-entry-layer-deep {
+  background-image:
+    linear-gradient(to right, rgba(255, 106, 26, 0.08) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 106, 26, 0.08) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse at 50% 35%, black 20%, transparent 78%);
+}
+
+.spidey-stage-grid {
+  transform: translate3d(calc(var(--app-px) * -0.45), calc(var(--app-py) * -0.45 + var(--app-scroll-y)), 0);
+  transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+}
+
+.spidey-stage-glow-primary {
+  transform: translate3d(calc(var(--app-px) * 0.85), calc(var(--app-py) * 0.85 + var(--app-scroll-y) * 0.6), 0);
+  transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+}
+
+.spidey-stage-glow-secondary {
+  transform: translate3d(calc(var(--app-px) * -0.65), calc(var(--app-py) * -0.65 - var(--app-scroll-y) * 0.4), 0);
+  transition: transform 260ms cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: transform;
+}
+
+/* Interactive 3D Tilt & Spotlight Surface */
+.spidey-tilt-card {
+  --tilt-rx: 0deg;
+  --tilt-ry: 0deg;
+  --spot-x: 50%;
+  --spot-y: 50%;
+  transform: perspective(1200px) rotateX(var(--tilt-rx)) rotateY(var(--tilt-ry));
+  transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1), border-color 220ms ease, box-shadow 220ms ease;
+  will-change: transform;
+}
+
+.spidey-tilt-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: inherit;
+  background: radial-gradient(
+    540px circle at var(--spot-x) var(--spot-y),
+    rgba(255, 106, 26, 0.11),
+    transparent 60%
+  );
+  z-index: 1;
+}
+
+/* Full-screen Entry Overlay Multi-Layer Parallax */
+.spidey-entry-layer-deep {
+  transform: translate3d(calc(var(--entry-px, 0px) * -0.5), calc(var(--entry-py, 0px) * -0.5), 0) scale(1.06);
+  transition: transform 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.spidey-entry-layer-mid {
+  transform: translate3d(calc(var(--entry-px, 0px) * 0.8), calc(var(--entry-py, 0px) * 0.8), 0);
+  transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.spidey-entry-layer-front {
+  transform: translate3d(calc(var(--entry-px, 0px) * 0.25), calc(var(--entry-py, 0px) * 0.25), 0);
+  transition: transform 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spidey-stage-grid,
+  .spidey-stage-glow-primary,
+  .spidey-stage-glow-secondary,
+  .spidey-tilt-card,
+  .spidey-entry-layer-deep,
+  .spidey-entry-layer-mid,
+  .spidey-entry-layer-front {
+    transform: none !important;
+    transition: none !important;
+  }
+}
+

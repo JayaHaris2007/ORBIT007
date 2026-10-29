@@ -279,6 +279,18 @@ const AssistantSidebar = () => {
     };
     submitPromptRef.current = submitPrompt;
 
+    useEffect(() => {
+        const onExternalPrompt = (event) => {
+            const incoming = event?.detail?.prompt;
+            if (!incoming) return;
+            setMinimized(false);
+            setOpen(true);
+            submitPromptRef.current?.(incoming);
+        };
+        window.addEventListener('spidey:prompt', onExternalPrompt);
+        return () => window.removeEventListener('spidey:prompt', onExternalPrompt);
+    }, []);
+
     const sendMessage = (event) => {
         event.preventDefault();
         submitPrompt(prompt);
