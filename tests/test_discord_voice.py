@@ -542,7 +542,16 @@ def test_server_reminder_calls_user_when_not_on_call():
                                         bot.discord_chats["test-chat-voice-2"] = "9999"
                                         bot.last_notification_id["test-chat-voice-2"] = 0
 
-                                        with patch("asyncio.sleep", side_effect=[None, asyncio.CancelledError]):
+                                        sleep_count = 0
+                                        async def _mock_sleep(s):
+                                            nonlocal sleep_count
+                                            if s == 5:
+                                                sleep_count += 1
+                                                if sleep_count > 1:
+                                                    raise asyncio.CancelledError()
+                                            return None
+
+                                        with patch("asyncio.sleep", side_effect=_mock_sleep):
                                             with patch.object(bot, "wait_until_ready", new_callable=AsyncMock):
                                                 try:
                                                     await bot.deliver_notifications()

@@ -8,6 +8,7 @@ export default function LiveOverlay({
     transcript = '',
     reply = '',
     timing = {},
+    error = null,
     onStopTurn,
     onClose
 }) {
@@ -124,6 +125,11 @@ export default function LiveOverlay({
 
                     {/* Speech Display */}
                     <div className="mt-8 max-w-md text-center">
+                        {error && (
+                            <p className="mb-3 rounded-lg border border-red-500/30 bg-red-950/40 px-3 py-1.5 text-xs font-medium text-red-300">
+                                {error}
+                            </p>
+                        )}
                         {transcript && (
                             <p className="text-xs text-neutral-400 italic">
                                 &ldquo;{transcript}&rdquo;

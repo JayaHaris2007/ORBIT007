@@ -110,6 +110,13 @@ export default defineConfig({
     allowedHosts: true,
     hmr: process.env.DISABLE_HMR !== 'true',
     watch: process.env.DISABLE_HMR === 'true' ? null : {},
+    proxy: {
+      '/ws': {
+        target: 'ws://127.0.0.1:8000',
+        ws: true,
+        changeOrigin: true,
+      },
+    },
   },
   preview: {
     allowedHosts: true,

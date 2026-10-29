@@ -19,8 +19,19 @@ export function useVoiceSession({ onTranscript = null, onReply = null, audioQueu
     const nextExpectedAudioSeqRef = useRef(null);
 
     const getWsUrl = () => {
-        const base = API_BASE_URL.replace(/^http/, 'ws');
-        return `${base}/ws/voice`;
+        if (import.meta.env.VITE_SPIDEY_API_BASE_URL) {
+            const base = import.meta.env.VITE_SPIDEY_API_BASE_URL.replace(/^http/, 'ws').replace(/\/$/, '');
+            return `${base}/ws/voice`;
+        }
+        if (typeof window !== 'undefined') {
+            const host = window.location.hostname || '127.0.0.1';
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            if (window.location.port === '3000') {
+                return `${protocol}//${host}:8000/ws/voice`;
+            }
+            return `${protocol}//${window.location.host}/ws/voice`;
+        }
+        return 'ws://127.0.0.1:8000/ws/voice';
     };
 
     const cleanupAudioCapture = useCallback(() => {
@@ -166,14 +177,14 @@ export function useVoiceSession({ onTranscript = null, onReply = null, audioQueu
 
                 ws.onerror = (err) => {
                     console.error('Voice WebSocket error:', err);
-                    setError('Voice WebSocket connection error.');
+                    setError('Voice WebSocket connection error. Please ensure the S.P.I.D.E.Y server is running.');
+                    cleanupAudioCapture();
+                    setState('idle');
                 };
 
                 ws.onclose = () => {
-                    if (sessionMode !== 'live') {
-                        cleanupAudioCapture();
-                        setState('idle');
-                    }
+                    cleanupAudioCapture();
+                    setState('idle');
                 };
             } catch (err) {
                 console.error('Failed to initialize mic/voice session:', err);

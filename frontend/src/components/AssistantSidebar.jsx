@@ -497,6 +497,7 @@ const AssistantSidebar = () => {
                 transcript={voiceSession.transcript}
                 reply={voiceSession.reply}
                 timing={voiceSession.timing}
+                error={voiceSession.error}
                 onStopTurn={voiceSession.interrupt}
                 onClose={() => {
                     setLiveOpen(false);
