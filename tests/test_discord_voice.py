@@ -1,6 +1,7 @@
 """Tests for Discord voice bridge, PCM conversion, QueuePCMSource, and call controls."""
 
 import asyncio
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 import numpy as np
 import pytest
@@ -407,5 +408,207 @@ def test_dm_reminder_delivery_routes_to_dm():
 
                     # send_dm MUST be called for DM reminder
                     bot.send_dm.assert_called_once_with(8888, "Just a nudge: dinner. It's 9:36 PM right now.")
+
+    asyncio.run(_test())
+
+
+def test_server_reminder_auto_joins_voice_when_user_on_call():
+    async def _test():
+        import discord
+        import discord_bot
+        from voice.discord_voice import get_discord_voice_manager
+
+        bot = discord_bot.bot
+        mock_text_channel = AsyncMock(spec=discord.TextChannel)
+        mock_text_channel.send = AsyncMock()
+
+        mock_user_vc = MagicMock(spec=discord.VoiceChannel)
+        mock_user_vc.id = 888
+        mock_user_vc.name = "Study Lounge"
+
+        mock_member = MagicMock(spec=discord.Member)
+        mock_member.id = 9999
+        mock_member.voice = MagicMock(channel=mock_user_vc)
+
+        mock_guild = MagicMock(spec=discord.Guild)
+        mock_guild.id = 777
+        mock_guild.get_member.return_value = mock_member
+
+        mock_notification = {
+            "id": 20,
+            "chat_id": "test-chat-voice-1",
+            "reminder_id": "rem-vc-1",
+            "content": "Just a nudge: stretch. It's 11:00 AM right now.",
+        }
+
+        mock_target = {
+            "reminder_id": "rem-vc-1",
+            "channel_id": 555,
+            "guild_id": 777,
+            "user_id": 9999,
+        }
+
+        voice_mgr = get_discord_voice_manager()
+        with patch.object(bot, "get_channel", return_value=mock_text_channel):
+            with patch.object(bot, "get_guild", return_value=mock_guild):
+                with patch("app.memory_store.get_reminder_delivery_target", return_value=mock_target):
+                    with patch("app.memory_store.list_notifications", return_value=[mock_notification]):
+                        with patch("app.memory_store.add_message"):
+                            with patch.object(voice_mgr, "join_voice_channel", new_callable=AsyncMock) as mock_join:
+                                with patch.object(voice_mgr, "speak_text", new_callable=AsyncMock) as mock_speak:
+                                    saved_chats = dict(bot.discord_chats)
+                                    saved_ids = dict(bot.last_notification_id)
+                                    try:
+                                        bot.discord_chats.clear()
+                                        bot.last_notification_id.clear()
+                                        bot.discord_chats["test-chat-voice-1"] = "9999"
+                                        bot.last_notification_id["test-chat-voice-1"] = 0
+
+                                        with patch("asyncio.sleep", side_effect=[None, asyncio.CancelledError]):
+                                            with patch.object(bot, "wait_until_ready", new_callable=AsyncMock):
+                                                try:
+                                                    await bot.deliver_notifications()
+                                                except asyncio.CancelledError:
+                                                    pass
+                                    finally:
+                                        bot.discord_chats = saved_chats
+                                        bot.last_notification_id = saved_ids
+
+                                    # S.P.I.D.E.Y should auto-join the user's voice channel
+                                    mock_join.assert_called_once_with(mock_user_vc, 555, guild_id=777)
+                                    # S.P.I.D.E.Y should speak the reminder in voice
+                                    mock_speak.assert_called_once_with(777, 9999, "Just a nudge: stretch. It's 11:00 AM right now.")
+                                    # Text channel gets notification noting voice delivery
+                                    mock_text_channel.send.assert_called_once_with(
+                                        "<@9999> Just a nudge: stretch. It's 11:00 AM right now. *(Spoken in 🔊 Study Lounge)*"
+                                    )
+
+    asyncio.run(_test())
+
+
+def test_server_reminder_calls_user_when_not_on_call():
+    async def _test():
+        import discord
+        import discord_bot
+        from voice.discord_voice import get_discord_voice_manager
+
+        bot = discord_bot.bot
+        bot.send_dm = AsyncMock()
+
+        mock_text_channel = AsyncMock(spec=discord.TextChannel)
+        mock_text_channel.send = AsyncMock()
+
+        mock_vc = MagicMock(spec=discord.VoiceChannel)
+        mock_vc.id = 444
+        mock_vc.name = "General"
+
+        mock_member = MagicMock(spec=discord.Member)
+        mock_member.id = 9999
+        mock_member.voice = None  # User is NOT on call
+
+        mock_guild = MagicMock(spec=discord.Guild)
+        mock_guild.id = 777
+        mock_guild.name = "Test Guild"
+        mock_guild.voice_channels = [mock_vc]
+        mock_guild.get_member.return_value = mock_member
+
+        mock_notification = {
+            "id": 21,
+            "chat_id": "test-chat-voice-2",
+            "reminder_id": "rem-vc-2",
+            "content": "Just a nudge: sleep. It's 10:08 PM right now.",
+        }
+
+        mock_target = {
+            "reminder_id": "rem-vc-2",
+            "channel_id": 555,
+            "guild_id": 777,
+            "user_id": 9999,
+        }
+
+        voice_mgr = get_discord_voice_manager()
+        with patch.object(bot, "get_channel", return_value=mock_text_channel):
+            with patch.object(bot, "get_guild", return_value=mock_guild):
+                with patch("app.memory_store.get_reminder_delivery_target", return_value=mock_target):
+                    with patch("app.memory_store.list_notifications", return_value=[mock_notification]):
+                        with patch("app.memory_store.add_message"):
+                            with patch.object(voice_mgr, "join_voice_channel", new_callable=AsyncMock) as mock_join:
+                                with patch.object(voice_mgr, "speak_text", new_callable=AsyncMock) as mock_speak:
+                                    saved_chats = dict(bot.discord_chats)
+                                    saved_ids = dict(bot.last_notification_id)
+                                    try:
+                                        bot.discord_chats.clear()
+                                        bot.last_notification_id.clear()
+                                        bot.discord_chats["test-chat-voice-2"] = "9999"
+                                        bot.last_notification_id["test-chat-voice-2"] = 0
+
+                                        with patch("asyncio.sleep", side_effect=[None, asyncio.CancelledError]):
+                                            with patch.object(bot, "wait_until_ready", new_callable=AsyncMock):
+                                                try:
+                                                    await bot.deliver_notifications()
+                                                except asyncio.CancelledError:
+                                                    pass
+                                    finally:
+                                        bot.discord_chats = saved_chats
+                                        bot.last_notification_id = saved_ids
+
+                                    # S.P.I.D.E.Y should join the server's General voice channel to call user
+                                    mock_join.assert_called_once_with(mock_vc, 555, guild_id=777)
+                                    # S.P.I.D.E.Y should speak reminder in voice channel
+                                    mock_speak.assert_called_once_with(777, 9999, "Just a nudge: sleep. It's 10:08 PM right now.")
+                                    # Text channel gets call alert with join link
+                                    assert mock_text_channel.send.call_count == 1
+                                    call_msg = mock_text_channel.send.call_args[0][0]
+                                    assert "📞 <@9999> **Incoming Call — Reminder!**" in call_msg
+                                    assert "https://discord.com/channels/777/444" in call_msg
+                                    # DM ring alert was sent
+                                    bot.send_dm.assert_called_once()
+                                    # Pending reminder was registered for user in that voice channel
+                                    assert (777, 9999) in bot.pending_call_reminders
+
+    asyncio.run(_test())
+
+
+def test_on_voice_state_update_speaks_pending_reminder():
+    async def _test():
+        import discord
+        import discord_bot
+        from voice.discord_voice import get_discord_voice_manager
+
+        bot = discord_bot.bot
+        voice_mgr = get_discord_voice_manager()
+
+        mock_vc = MagicMock(spec=discord.VoiceChannel)
+        mock_vc.id = 444
+        mock_vc.name = "General"
+
+        mock_guild = MagicMock(spec=discord.Guild)
+        mock_guild.id = 777
+
+        mock_member = MagicMock(spec=discord.Member)
+        mock_member.id = 9999
+        mock_member.display_name = "Jaya Haris"
+        mock_member.bot = False
+        mock_member.guild = mock_guild
+
+        # Setup pending reminder
+        bot.pending_call_reminders[(777, 9999)] = {
+            "content": "Just a nudge: sleep. It's 10:08 PM right now.",
+            "voice_channel_id": 444,
+            "created_at": time.perf_counter(),
+        }
+
+        before_state = MagicMock(spec=discord.VoiceState, channel=None)
+        after_state = MagicMock(spec=discord.VoiceState, channel=mock_vc)
+
+        with patch.object(voice_mgr, "is_call_active", return_value=True):
+            with patch.object(voice_mgr, "speak_text", new_callable=AsyncMock) as mock_speak:
+                await bot.on_voice_state_update(mock_member, before_state, after_state)
+                # Pending reminder should be consumed
+                assert (777, 9999) not in bot.pending_call_reminders
+                # S.P.I.D.E.Y speaks greeting and reminder
+                mock_speak.assert_called_once_with(
+                    777, 9999, "Hey Jaya Haris, you made it! Just a nudge: sleep. It's 10:08 PM right now."
+                )
 
     asyncio.run(_test())

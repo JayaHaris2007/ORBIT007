@@ -248,28 +248,23 @@ class DiscordVoiceManager:
         with self._lock:
             return guild_id in self.calls
 
-    async def join_call(
-        self, message: discord.Message
+    async def join_voice_channel(
+        self,
+        target_channel: Any,
+        text_channel_id: int,
+        guild_id: int | None = None,
     ) -> tuple[bool, str]:
-        """Join the voice channel of the message author and link the text channel."""
-        if message.guild is None:
-            return False, "Voice calls can only be started in a server channel, not in DMs."
+        if guild_id is None:
+            guild_id = getattr(getattr(target_channel, "guild", None), "id", None)
 
-        author = message.author
-        voice_state = getattr(author, "voice", None)
-        if not voice_state or not getattr(voice_state, "channel", None):
-            return False, "You need to be in a voice channel first for me to join."
-
-        target_channel = author.voice.channel
-        guild_id = message.guild.id
-
-        # Check existing call
-        call = self.get_call(guild_id)
-        if call:
-            if call.voice_client.channel.id == target_channel.id:
-                call.text_channel_id = message.channel.id
-                return True, f"Already in {target_channel.name}. Linked to this channel."
-            await self.leave_call(guild_id)
+        if guild_id is not None:
+            # Check existing call
+            call = self.get_call(guild_id)
+            if call:
+                if getattr(getattr(call, "voice_client", None), "channel", None) and call.voice_client.channel.id == target_channel.id:
+                    call.text_channel_id = text_channel_id
+                    return True, f"Already in {getattr(target_channel, 'name', 'voice')}. Linked to this channel."
+                await self.leave_call(guild_id)
 
         try:
             if _VOICE_RECV_AVAILABLE and voice_recv is not None:
@@ -285,13 +280,14 @@ class DiscordVoiceManager:
             vc.play(source)
 
             call = DiscordVoiceCall(
-                guild_id=guild_id,
+                guild_id=guild_id if guild_id is not None else 0,
                 voice_client=vc,
-                text_channel_id=message.channel.id,
+                text_channel_id=text_channel_id,
                 source=source,
             )
-            with self._lock:
-                self.calls[guild_id] = call
+            if guild_id is not None:
+                with self._lock:
+                    self.calls[guild_id] = call
 
             # Attach receive sink if voice_recv is available
             if _VOICE_RECV_AVAILABLE and voice_recv is not None and isinstance(vc, voice_recv.VoiceRecvClient):
@@ -301,12 +297,13 @@ class DiscordVoiceManager:
                     sink = voice_recv.SilenceGeneratorSink(raw_sink)
                     vc.listen(sink)
                     call.sink = sink
-                    log.info("Attached Discord voice receive sink on channel %s", target_channel.name)
+                    log.info("Attached Discord voice receive sink on channel %s", getattr(target_channel, 'name', 'voice'))
                 except Exception as err:
                     log.warning("Could not attach voice receive sink: %s", err)
 
-            log.info("Joined voice channel %s in guild %s", target_channel.name, guild_id)
-            return True, f"Joined **{target_channel.name}**. I'm listening and speaking in voice!"
+            channel_name = getattr(target_channel, 'name', 'voice channel')
+            log.info("Joined voice channel %s in guild %s", channel_name, guild_id)
+            return True, f"Joined **{channel_name}**. I'm listening and speaking in voice!"
         except Exception as e:
             err_msg = str(e)
             log.exception("Failed to connect to Discord voice: %s", e)
@@ -316,7 +313,22 @@ class DiscordVoiceManager:
                     f"Discord voice encryption error: {err_msg} "
                     f"(discord.py {discord.__version__}, davey {davey.__version__})"
                 )
-            return False, f"Could not join voice channel: {err_msg}"
+            return False, f"Could not join voice channel: {err_msg}"""
+
+    async def join_call(
+        self, message: discord.Message
+    ) -> tuple[bool, str]:
+        """Join the voice channel of the message author and link the text channel."""
+        if message.guild is None:
+            return False, "Voice calls can only be started in a server channel, not in DMs."
+
+        author = message.author
+        voice_state = getattr(author, "voice", None)
+        if not voice_state or not getattr(voice_state, "channel", None):
+            return False, "You need to be in a voice channel first for me to join."
+
+        target_channel = author.voice.channel
+        return await self.join_voice_channel(target_channel, message.channel.id, guild_id=message.guild.id)
 
     async def leave_call(self, guild_id: int) -> str:
         with self._lock:
