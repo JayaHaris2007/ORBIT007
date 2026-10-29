@@ -279,3 +279,133 @@ def test_respond_to_voice_utterance():
 
     asyncio.run(_test())
 
+
+
+def test_reminder_delivery_target_storage_in_memory_store(tmp_path):
+    from pathlib import Path
+    from memory import MemoryStore
+    db_file = tmp_path / "test_reminders.db"
+    store = MemoryStore(db_file)
+
+    # Test initial retrieval
+    assert store.get_reminder_delivery_target("rem-1") is None
+
+    # Test save
+    store.save_reminder_delivery_target("rem-1", channel_id=123, guild_id=456, user_id=789)
+    target = store.get_reminder_delivery_target("rem-1")
+    assert target is not None
+    assert target["channel_id"] == 123
+    assert target["guild_id"] == 456
+    assert target["user_id"] == 789
+
+    # Test upsert
+    store.save_reminder_delivery_target("rem-1", channel_id=999, guild_id=456, user_id=789)
+    target2 = store.get_reminder_delivery_target("rem-1")
+    assert target2["channel_id"] == 999
+
+
+def test_server_channel_reminder_delivery_routes_to_channel():
+    async def _test():
+        import discord
+        import discord_bot
+
+        mock_channel = AsyncMock(spec=discord.TextChannel)
+        mock_channel.send = AsyncMock()
+
+        bot = discord_bot.bot
+        bot.send_dm = AsyncMock()
+
+        # Mock notification
+        mock_notification = {
+            "id": 10,
+            "chat_id": "test-chat-1",
+            "reminder_id": "rem-server-1",
+            "content": "Just a nudge: sleep. It's 10:08 PM right now.",
+        }
+
+        # Mock target pointing to guild channel
+        mock_target = {
+            "reminder_id": "rem-server-1",
+            "channel_id": 555,
+            "guild_id": 777,
+            "user_id": 9999,
+        }
+
+        with patch.object(bot, "get_channel", return_value=mock_channel):
+            with patch("app.memory_store.get_reminder_delivery_target", return_value=mock_target):
+                with patch("app.memory_store.list_notifications", return_value=[mock_notification]):
+                    with patch("app.memory_store.add_message"):
+                        saved_chats = dict(bot.discord_chats)
+                        saved_ids = dict(bot.last_notification_id)
+                        try:
+                            bot.discord_chats.clear()
+                            bot.last_notification_id.clear()
+                            bot.discord_chats["test-chat-1"] = "9999"
+                            bot.last_notification_id["test-chat-1"] = 0
+
+                            # Run deliver_notifications for one iteration
+                            with patch("asyncio.sleep", side_effect=[None, asyncio.CancelledError]):
+                                with patch.object(bot, "wait_until_ready", new_callable=AsyncMock):
+                                    try:
+                                        await bot.deliver_notifications()
+                                    except asyncio.CancelledError:
+                                        pass
+                        finally:
+                            bot.discord_chats = saved_chats
+                            bot.last_notification_id = saved_ids
+
+                        # Server channel MUST receive the message mentioning the user
+                        mock_channel.send.assert_called_once_with("<@9999> Just a nudge: sleep. It's 10:08 PM right now.")
+                        # send_dm MUST NOT have been called
+                        bot.send_dm.assert_not_called()
+
+    asyncio.run(_test())
+
+
+def test_dm_reminder_delivery_routes_to_dm():
+    async def _test():
+        import discord_bot
+
+        bot = discord_bot.bot
+        bot.send_dm = AsyncMock()
+
+        mock_notification = {
+            "id": 11,
+            "chat_id": "test-chat-2",
+            "reminder_id": "rem-dm-1",
+            "content": "Just a nudge: dinner. It's 9:36 PM right now.",
+        }
+
+        # Target has no guild/channel (DM reminder)
+        mock_target = {
+            "reminder_id": "rem-dm-1",
+            "channel_id": None,
+            "guild_id": None,
+            "user_id": 8888,
+        }
+
+        with patch("app.memory_store.get_reminder_delivery_target", return_value=mock_target):
+            with patch("app.memory_store.list_notifications", return_value=[mock_notification]):
+                with patch("app.memory_store.add_message"):
+                    saved_chats = dict(bot.discord_chats)
+                    saved_ids = dict(bot.last_notification_id)
+                    try:
+                        bot.discord_chats.clear()
+                        bot.last_notification_id.clear()
+                        bot.discord_chats["test-chat-2"] = "8888"
+                        bot.last_notification_id["test-chat-2"] = 0
+
+                        with patch("asyncio.sleep", side_effect=[None, asyncio.CancelledError]):
+                            with patch.object(bot, "wait_until_ready", new_callable=AsyncMock):
+                                try:
+                                    await bot.deliver_notifications()
+                                except asyncio.CancelledError:
+                                    pass
+                    finally:
+                        bot.discord_chats = saved_chats
+                        bot.last_notification_id = saved_ids
+
+                    # send_dm MUST be called for DM reminder
+                    bot.send_dm.assert_called_once_with(8888, "Just a nudge: dinner. It's 9:36 PM right now.")
+
+    asyncio.run(_test())

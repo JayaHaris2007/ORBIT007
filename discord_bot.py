@@ -122,7 +122,7 @@ class SpideyBot(commands.Bot):
         )
 
     async def deliver_notifications(self) -> None:
-        """Poll the shared database and DM reminders to their Discord owners."""
+        """Poll the shared database and deliver reminders to server channels or DMs."""
         await self.wait_until_ready()
         while not self.is_closed():
             await asyncio.sleep(DISCORD_NOTIFICATION_POLL_SECONDS)
@@ -142,35 +142,104 @@ class SpideyBot(commands.Bot):
                     if not content:
                         self.last_notification_id[chat_id] = notification["id"]
                         continue
-                    try:
-                        await self.send_dm(int(external_user_id), content)
-                        self.last_notification_id[chat_id] = notification["id"]
-                        LOGGER.info(
-                            "Delivered notification %s to user %s.",
-                            notification["id"],
-                            external_user_id,
-                        )
+
+                    reminder_id = notification.get("reminder_id")
+                    target = None
+                    if reminder_id:
                         try:
-                            await asyncio.to_thread(
-                                app.memory_store.add_message,
-                                chat_id,
-                                "assistant",
-                                content,
+                            target = await asyncio.to_thread(
+                                app.memory_store.get_reminder_delivery_target,
+                                reminder_id,
+                            )
+                        except Exception as e:
+                            LOGGER.warning("Could not fetch reminder target for %s: %s", reminder_id, e)
+
+                    delivered = False
+                    if target and target.get("channel_id") and target.get("guild_id"):
+                        channel = self.get_channel(target["channel_id"])
+                        if channel is None:
+                            try:
+                                channel = await self.fetch_channel(target["channel_id"])
+                            except Exception:
+                                channel = None
+
+                        if channel is not None and isinstance(
+                            channel, (discord.TextChannel, discord.Thread)
+                        ):
+                            try:
+                                user_mention = f"<@{target['user_id']}>"
+                                server_msg = f"{user_mention} {content}"
+                                for chunk in _split_response(server_msg):
+                                    await channel.send(chunk)
+
+                                voice_mgr = get_discord_voice_manager()
+                                if voice_mgr.is_call_active(target["guild_id"]):
+                                    asyncio.create_task(
+                                        voice_mgr.speak_text(
+                                            target["guild_id"], target["user_id"], content
+                                        )
+                                    )
+
+                                self.last_notification_id[chat_id] = notification["id"]
+                                LOGGER.info(
+                                    "Delivered notification %s to server channel %s for user %s.",
+                                    notification["id"],
+                                    target["channel_id"],
+                                    target["user_id"],
+                                )
+                                delivered = True
+                                try:
+                                    await asyncio.to_thread(
+                                        app.memory_store.add_message,
+                                        chat_id,
+                                        "assistant",
+                                        content,
+                                    )
+                                except Exception:
+                                    pass
+                            except discord.Forbidden:
+                                LOGGER.warning(
+                                    "Cannot send notification %s to channel %s (forbidden); falling back to DM.",
+                                    notification["id"],
+                                    target["channel_id"],
+                                )
+                            except Exception:
+                                LOGGER.exception(
+                                    "Could not deliver notification %s to channel %s; falling back to DM.",
+                                    notification["id"],
+                                    target["channel_id"],
+                                )
+
+                    if not delivered:
+                        try:
+                            await self.send_dm(int(external_user_id), content)
+                            self.last_notification_id[chat_id] = notification["id"]
+                            LOGGER.info(
+                                "Delivered notification %s to user %s via DM.",
+                                notification["id"],
+                                external_user_id,
+                            )
+                            try:
+                                await asyncio.to_thread(
+                                    app.memory_store.add_message,
+                                    chat_id,
+                                    "assistant",
+                                    content,
+                                )
+                            except Exception:
+                                pass
+                        except discord.Forbidden:
+                            self.last_notification_id[chat_id] = notification["id"]
+                            LOGGER.warning(
+                                "Cannot DM notification %s to user %s; DMs are closed.",
+                                notification["id"],
+                                external_user_id,
                             )
                         except Exception:
-                            pass
-                    except discord.Forbidden:
-                        self.last_notification_id[chat_id] = notification["id"]
-                        LOGGER.warning(
-                            "Cannot DM notification %s to user %s; DMs are closed.",
-                            notification["id"],
-                            external_user_id,
-                        )
-                    except Exception:
-                        LOGGER.exception(
-                            "Could not deliver notification %s.",
-                            notification["id"],
-                        )
+                            LOGGER.exception(
+                                "Could not deliver notification %s.",
+                                notification["id"],
+                            )
 
     async def send_dm(self, user_id: int, content: str) -> None:
         user = self.get_user(user_id)
@@ -261,6 +330,10 @@ class SpideyBot(commands.Bot):
         chat_id = chat["id"]
         self.track_chat(chat_id, str(message.author.id))
 
+        existing_reminders = {
+            r["id"] for r in app.memory_store.list_reminders(active_only=True)
+        }
+
         try:
             command = await asyncio.to_thread(
                 app._handle_local_command, prompt, chat_id
@@ -276,6 +349,20 @@ class SpideyBot(commands.Bot):
         if command is not None:
             response, provider = command
             LOGGER.info("Answered locally with %s.", provider)
+            new_reminders = [
+                r for r in app.memory_store.list_reminders(active_only=True)
+                if r["id"] not in existing_reminders and r.get("chat_id") == chat_id
+            ]
+            for r in new_reminders:
+                channel_id = message.channel.id if message.guild is not None else None
+                guild_id = message.guild.id if message.guild is not None else None
+                await asyncio.to_thread(
+                    app.memory_store.save_reminder_delivery_target,
+                    r["id"],
+                    channel_id,
+                    guild_id,
+                    message.author.id,
+                )
             app.memory_store.add_message(chat_id, "user", prompt)
             app.memory_store.add_message(chat_id, "assistant", response)
             for chunk in _split_response(response):
@@ -347,6 +434,10 @@ class SpideyBot(commands.Bot):
         chat_id = chat["id"]
         self.track_chat(chat_id, str(user.id))
 
+        existing_reminders = {
+            r["id"] for r in app.memory_store.list_reminders(active_only=True)
+        }
+
         try:
             command = await asyncio.to_thread(
                 app._handle_local_command, prompt, chat_id
@@ -364,6 +455,18 @@ class SpideyBot(commands.Bot):
         if command is not None:
             response, provider = command
             LOGGER.info("Voice answered locally with %s.", provider)
+            new_reminders = [
+                r for r in app.memory_store.list_reminders(active_only=True)
+                if r["id"] not in existing_reminders and r.get("chat_id") == chat_id
+            ]
+            for r in new_reminders:
+                await asyncio.to_thread(
+                    app.memory_store.save_reminder_delivery_target,
+                    r["id"],
+                    text_channel_id,
+                    guild_id,
+                    user.id,
+                )
             app.memory_store.add_message(chat_id, "user", prompt)
             app.memory_store.add_message(chat_id, "assistant", response)
             if text_channel is not None:

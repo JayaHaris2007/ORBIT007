@@ -142,6 +142,15 @@ class MemoryStore:
                     created_at TEXT NOT NULL,
                     UNIQUE(reminder_id, created_at)
                 );
+                CREATE TABLE IF NOT EXISTS reminder_delivery_targets (
+                    reminder_id TEXT PRIMARY KEY,
+                    channel_id INTEGER,
+                    guild_id INTEGER,
+                    user_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS reminder_delivery_targets_idx
+                    ON reminder_delivery_targets(reminder_id);
                 DELETE FROM messages
                 WHERE role = 'assistant'
                   AND EXISTS (
@@ -648,6 +657,39 @@ class MemoryStore:
                 (chat_id,),
             ).fetchone()
         return int(row["latest"])
+
+    def save_reminder_delivery_target(
+        self,
+        reminder_id: str,
+        channel_id: int | None,
+        guild_id: int | None,
+        user_id: int,
+    ) -> None:
+        now = _now()
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO reminder_delivery_targets
+                (reminder_id, channel_id, guild_id, user_id, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(reminder_id) DO UPDATE SET
+                    channel_id = excluded.channel_id,
+                    guild_id = excluded.guild_id,
+                    user_id = excluded.user_id,
+                    created_at = excluded.created_at
+                """,
+                (reminder_id, channel_id, guild_id, user_id, now),
+            )
+
+    def get_reminder_delivery_target(
+        self, reminder_id: str
+    ) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM reminder_delivery_targets WHERE reminder_id = ?",
+                (reminder_id,),
+            ).fetchone()
+        return dict(row) if row else None
 
     def has_recent_coach_notification(
         self, chat_id: str, minutes: int = 30
