@@ -612,3 +612,27 @@ def test_on_voice_state_update_speaks_pending_reminder():
                 )
 
     asyncio.run(_test())
+
+
+def test_discord_server_text_message_works_without_call_join():
+    """Verify that messages in server text channels work normally without needing !call join."""
+    async def _test():
+        import discord_bot
+
+        mock_msg = MagicMock()
+        mock_msg.author.bot = False
+        mock_msg.content = "set reminder at 22:08 for sleep"
+        mock_msg.guild.id = 777
+        mock_msg.channel.id = 555
+        mock_msg.mentions = []
+
+        mock_mgr = MagicMock()
+        mock_mgr.get_call.return_value = None  # No call active!
+        mock_mgr.is_call_active.return_value = False
+
+        with patch.object(discord_bot, "get_discord_voice_manager", return_value=mock_mgr):
+            with patch.object(discord_bot.bot, "respond_to_prompt", new_callable=AsyncMock) as mock_respond:
+                await discord_bot.on_message(mock_msg)
+                mock_respond.assert_called_once_with(mock_msg, "set reminder at 22:08 for sleep")
+
+    asyncio.run(_test())

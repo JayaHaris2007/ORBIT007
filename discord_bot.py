@@ -435,7 +435,7 @@ class SpideyBot(commands.Bot):
                 await message.reply(msg)
                 return
             if re.fullmatch(
-                r"(?:(?:call\s+)?leave(?:\s+(?:the\s+|my\s+)?(?:call|voice|vc|voice\s+channel))?|"
+                r"(?:(?:call\s+)?(?:leave|exit)(?:\s+(?:the\s+|my\s+)?(?:call|voice|vc|voice\s+channel))?|"
                 r"disconnect(?:\s+from\s+(?:call|voice|vc))?|hang\s+up)",
                 norm_call,
             ):
@@ -693,6 +693,12 @@ async def call_leave(ctx: commands.Context[Any]) -> None:
     await ctx.reply(msg)
 
 
+@call_group.command(name="exit")
+async def call_exit(ctx: commands.Context[Any]) -> None:
+    """Alias for !call leave."""
+    await call_leave(ctx)
+
+
 @call_group.command(name="stop")
 async def call_stop(ctx: commands.Context[Any]) -> None:
     if ctx.guild is None:
@@ -769,23 +775,9 @@ async def on_message(message: discord.Message) -> None:
         prompt = prompt.replace(f"<@!{bot.user.id}>", "").strip()
         await bot.respond_to_prompt(message, prompt)
         return
-    if message.guild is None and not message.content.startswith(bot.command_prefix):
+    if not message.content.startswith(bot.command_prefix):
         await bot.respond_to_prompt(message, message.content)
         return
-    if message.guild is not None and not message.content.startswith(bot.command_prefix):
-        voice_mgr = get_discord_voice_manager()
-        call = voice_mgr.get_call(message.guild.id)
-        if call is not None:
-            author_vc = getattr(getattr(message.author, "voice", None), "channel", None)
-            is_in_text_channel = (call.text_channel_id == message.channel.id)
-            is_author_in_voice = (
-                author_vc is not None
-                and getattr(call.voice_client, "channel", None) is not None
-                and author_vc.id == call.voice_client.channel.id
-            )
-            if is_in_text_channel or is_author_in_voice:
-                await bot.respond_to_prompt(message, message.content)
-                return
     await bot.process_commands(message)
 
 
