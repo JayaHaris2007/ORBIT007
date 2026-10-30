@@ -1,5 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
+const ORBIT_TOKEN = (import.meta.env.VITE_ORBIT_TOKEN || '').trim();
+const getAuthHeaders = (extra = {}) => ({
+  ...extra,
+  ...(ORBIT_TOKEN ? { 'x-orbit-token': ORBIT_TOKEN } : {}),
+});
+
 export function useOrbitAgent() {
   const [messages, setMessages] = useState([]);
   const [reminders, setReminders] = useState([]);
@@ -27,8 +33,8 @@ export function useOrbitAgent() {
   const fetchInitialData = useCallback(async () => {
     try {
       const [remRes, histRes] = await Promise.all([
-        fetch('/api/reminders'),
-        fetch('/api/history'),
+        fetch('/api/reminders', { headers: getAuthHeaders() }),
+        fetch('/api/history', { headers: getAuthHeaders() }),
       ]);
       if (remRes.ok) {
         const remData = await remRes.json();
@@ -50,7 +56,8 @@ export function useOrbitAgent() {
     let reconnectTimer;
     const connectWs = () => {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/ws`;
+      const tokenQuery = ORBIT_TOKEN ? `?token=${encodeURIComponent(ORBIT_TOKEN)}` : '';
+      const wsUrl = `${protocol}//${window.location.host}/ws${tokenQuery}`;
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
@@ -129,7 +136,7 @@ export function useOrbitAgent() {
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ message: text }),
       });
       const data = await res.json();
@@ -186,7 +193,7 @@ export function useOrbitAgent() {
   const addReminder = useCallback(async (title, remind_at) => {
     const res = await fetch('/api/reminders', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ title, remind_at }),
     });
     if (res.ok) {
@@ -198,7 +205,7 @@ export function useOrbitAgent() {
   const toggleReminder = useCallback(async (id, completed) => {
     const res = await fetch(`/api/reminders/${id}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ completed }),
     });
     if (res.ok) {
@@ -210,6 +217,7 @@ export function useOrbitAgent() {
   const deleteReminder = useCallback(async (id) => {
     const res = await fetch(`/api/reminders/${id}`, {
       method: 'DELETE',
+      headers: getAuthHeaders(),
     });
     if (res.ok) {
       const data = await res.json();

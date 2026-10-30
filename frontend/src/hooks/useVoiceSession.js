@@ -19,19 +19,21 @@ export function useVoiceSession({ onTranscript = null, onReply = null, audioQueu
     const nextExpectedAudioSeqRef = useRef(null);
 
     const getWsUrl = () => {
+        const token = (import.meta.env.VITE_ORBIT_TOKEN || '').trim();
+        const tokenQuery = token ? `?token=${encodeURIComponent(token)}` : '';
         if (import.meta.env.VITE_SPIDEY_API_BASE_URL) {
             const base = import.meta.env.VITE_SPIDEY_API_BASE_URL.replace(/^http/, 'ws').replace(/\/$/, '');
-            return `${base}/ws/voice`;
+            return `${base}/ws/voice${tokenQuery}`;
         }
         if (typeof window !== 'undefined') {
             const host = window.location.hostname || '127.0.0.1';
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             if (window.location.port === '3000') {
-                return `${protocol}//${host}:8000/ws/voice`;
+                return `${protocol}//${host}:8000/ws/voice${tokenQuery}`;
             }
-            return `${protocol}//${window.location.host}/ws/voice`;
+            return `${protocol}//${window.location.host}/ws/voice${tokenQuery}`;
         }
-        return 'ws://127.0.0.1:8000/ws/voice';
+        return `ws://127.0.0.1:8000/ws/voice${tokenQuery}`;
     };
 
     const cleanupAudioCapture = useCallback(() => {

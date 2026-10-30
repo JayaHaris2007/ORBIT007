@@ -24,7 +24,14 @@ htmlcov/
 # Local application data and generated output
 assistant.db
 assistant.db-*
+orbit007.db
+orbit007.db-*
+*.db
+*.db-wal
+*.db-shm
 output.wav
+TTS/*.wav
+.aistudio/
 offload/
 *.log
 

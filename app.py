@@ -1,3 +1,4 @@
+import secrets
 import os
 import sys
 import argparse
@@ -47,7 +48,7 @@ GPU_MEMORY_LIMIT = "5GiB"
 CPU_MEMORY_LIMIT = "6GiB"
 MAX_PROMPT_CHARS = 2000
 MAX_NEW_TOKENS = 512
-DATABASE_PATH = Path(__file__).resolve().parent / "assistant.db"
+DATABASE_PATH = Path(os.environ.get("ORBIT_DB_DIR", Path(__file__).resolve().parent)) / "assistant.db"
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import uvicorn
@@ -3993,19 +3994,45 @@ async def lifespan(_: FastAPI):
         release_model_process_lock()
 
 
+cors_origins_env = os.environ.get(
+    "ORBIT_CORS_ORIGINS",
+    "http://localhost:5173,http://127.0.0.1:5173,http://localhost:3000",
+)
+ORBIT_CORS_ORIGINS = [orig.strip() for orig in cors_origins_env.split(",") if orig.strip()]
+
+API_TOKEN = os.environ.get("ORBIT_API_TOKEN", "").strip()
+_OPEN_PATHS = ("/health", "/api/health", "/tts/")
+
 app = FastAPI(title="ORBIT007 Backend", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "*",
-    ],
-    allow_credentials=True,
+    allow_origins=ORBIT_CORS_ORIGINS,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def token_guard(request: Request, call_next):
+    if (
+        API_TOKEN
+        and request.method != "OPTIONS"
+        and not request.url.path.startswith(_OPEN_PATHS)
+    ):
+        supplied = request.headers.get("x-orbit-token", "")
+        if not secrets.compare_digest(supplied, API_TOKEN):
+            return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+    return await call_next(request)
+
+
+async def ws_authorized(ws: WebSocket) -> bool:
+    if not API_TOKEN:
+        return True
+    ok = secrets.compare_digest(ws.query_params.get("token", ""), API_TOKEN)
+    if not ok:
+        await ws.close(code=1008)
+    return ok
 app.mount("/tts", StaticFiles(directory=str(TTS_DIR)), name="tts")
 
 
@@ -4615,6 +4642,8 @@ async def api_chat(payload: ChatPayload):
 
 @app.websocket("/ws")
 async def websocket_agent_endpoint(websocket: WebSocket):
+    if not await ws_authorized(websocket):
+        return
     await ws_manager.connect(websocket)
     try:
         await websocket.send_json({
@@ -4746,6 +4775,11 @@ def parse_arguments() -> argparse.Namespace:
 def main() -> None:
     args = parse_arguments()
     if args.server:
+        if args.host == "0.0.0.0" and not os.environ.get("ORBIT_API_TOKEN", "").strip():
+            print(
+                "[SECURITY WARNING] Server is binding to 0.0.0.0 with no ORBIT_API_TOKEN set! "
+                "Any machine on your network can access this assistant."
+            )
         from runtime.guard import SPIDEY_MODEL_GUARD_PORT, get_port_owner_pid
         owner_pid = get_port_owner_pid(args.port) or get_port_owner_pid(SPIDEY_MODEL_GUARD_PORT)
         if owner_pid is not None and owner_pid != os.getpid():

@@ -10,7 +10,20 @@ import struct
 import time
 from typing import Any, Callable, Coroutine
 
+import os
+import secrets
 from fastapi import APIRouter, Body, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+
+API_TOKEN = os.environ.get("ORBIT_API_TOKEN", "").strip()
+
+
+async def ws_authorized(ws: WebSocket) -> bool:
+    if not API_TOKEN:
+        return True
+    ok = secrets.compare_digest(ws.query_params.get("token", ""), API_TOKEN)
+    if not ok:
+        await ws.close(code=1008)
+    return ok
 from fastapi.responses import JSONResponse
 
 from . import config, text_clean, sentences, session, tts, stt
@@ -186,6 +199,8 @@ def _calculate_pcm_energy(pcm_bytes: bytes) -> float:
 @ws_router.websocket("/ws/voice")
 async def websocket_voice_endpoint(websocket: WebSocket) -> None:
     """WebSocket gateway for continuous mic streaming, STT, and live conversational turns."""
+    if not await ws_authorized(websocket):
+        return
     await websocket.accept()
     client_id = f"ws-{id(websocket)}"
     voice_sess = session.get_voice_session(client_id)

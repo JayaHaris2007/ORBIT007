@@ -4,7 +4,9 @@ from contextlib import contextmanager
 from typing import List, Dict, Any, Optional
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "orbit007.db"
+import os
+DB_DIR = Path(os.environ.get("ORBIT_DB_DIR", BASE_DIR))
+DB_PATH = DB_DIR / "orbit007.db" 
 
 @contextmanager
 def get_db_connection():
