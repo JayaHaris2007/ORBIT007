@@ -44,7 +44,9 @@ class OmniVoiceEngine:
         # Resolve voice reference or voice design if not explicitly provided
         if not self.voice_kwargs:
             ref_path = config.TTS_REF_AUDIO
-            if ref_path and os.path.isfile(ref_path):
+            output_audio = (config.ROOT_DIR / "TTS" / "audio.wav").resolve()
+            # Ensure we only use ref_audio if it's an explicit external reference, not the dynamically generated output file
+            if ref_path and os.path.isfile(ref_path) and os.path.abspath(ref_path) != str(output_audio):
                 self.voice_kwargs = {
                     "ref_audio": ref_path,
                     "ref_text": config.TTS_REF_TEXT,
@@ -58,6 +60,15 @@ class OmniVoiceEngine:
                     "speed": config.TTS_SPEED,
                 }
                 log.info("OmniVoice configured with voice design instruct: %s", config.TTS_INSTRUCT)
+
+    def set_instruct(self, instruct: str, speed: float | None = None) -> None:
+        """Update voice design tone dynamically."""
+        self.voice_kwargs = {
+            "instruct": instruct.strip(),
+            "steps": config.TTS_STEPS,
+            "speed": speed if speed is not None else config.TTS_SPEED,
+        }
+        log.info("OmniVoice voice design updated to: %s (speed=%.2f)", instruct, self.voice_kwargs["speed"])
 
     def preload_background(self) -> None:
         """No-op when server eager loading is active; preserved for backward compatibility."""

@@ -52,9 +52,29 @@ DATABASE_PATH = Path(__file__).resolve().parent / "assistant.db"
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import uvicorn
 import assistant_tone
-from fastapi import Body, FastAPI, HTTPException, Query, Request
+import json
+from typing import Any, Optional, Dict, List
+from pydantic import BaseModel
+from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+from db import (
+    init_db,
+    DB_PATH,
+    create_reminder,
+    list_reminders,
+    update_reminder_status,
+    delete_reminder,
+    save_message,
+    get_recent_messages,
+)
+
+BASE_DIR = Path(__file__).resolve().parent
+TTS_DIR = BASE_DIR / "TTS"
+TTS_DIR.mkdir(parents=True, exist_ok=True)
+AUDIO_OUTPUT_PATH = TTS_DIR / "audio.wav"
 from memory import LOCAL_TIMEZONE, MAX_RETRIEVED_MEMORIES, MemoryStore
 from learning import roadmaps as learning_roadmaps, schema as learning_schema
 from learning import classifier as learning_classifier
@@ -3838,6 +3858,7 @@ def generate_response(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    init_db()
     from runtime.guard import acquire_model_process_lock, release_model_process_lock
     acquire_model_process_lock()
     try:
@@ -3876,20 +3897,20 @@ async def lifespan(_: FastAPI):
         release_model_process_lock()
 
 
-app = FastAPI(title="S.P.I.D.E.Y Local Assistant", lifespan=lifespan)
+app = FastAPI(title="ORBIT007 Backend", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        origin.strip()
-        for origin in os.environ.get(
-            "SPIDEY_CORS_ORIGINS",
-            "http://localhost:5173,http://127.0.0.1:5173",
-        ).split(",")
-        if origin.strip()
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "*",
     ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.mount("/tts", StaticFiles(directory=str(TTS_DIR)), name="tts")
 
 
 @app.exception_handler(Exception)
@@ -3927,24 +3948,22 @@ app.include_router(voice_router)
 app.include_router(voice_ws_router)
 
 
+@app.get("/api/health")
 @app.get("/health")
-def health():
+async def health():
     from runtime.models import REGISTRY
     return {
         "status": "ok",
+        "db_connected": DB_PATH.exists(),
+        "db_path": str(DB_PATH),
         "api_version": "spidey-local-2026-11",
         "model": "Qwen3-4B",
         "cuda": cuda_available,
         "load_seconds": round(load_seconds, 2) if load_seconds is not None else 0.0,
-        "database": str(DATABASE_PATH),
+        "database": str(DB_PATH),
         "semantic_memory": os.environ.get("AI_ENABLE_SEMANTIC_MEMORY", "1") != "0",
-        "models": REGISTRY.get_status_summary(),
+        "models": REGISTRY.get_status_summary() if hasattr(REGISTRY, "get_status_summary") else {},
     }
-
-
-@app.get("/api/health")
-def api_health():
-    return health()
 
 
 TOKENS_DEFAULT = 64
@@ -4259,48 +4278,231 @@ def nudge_task(payload: dict[str, Any] = Body(...)):
     return {"nudge": True, "task_count": len(tasks)}
 
 
-@app.get("/api/reminders")
-def list_reminders(include_cancelled: int = Query(0)):
-    return {
-        "reminders": memory_store.list_reminders(not include_cancelled),
-        "scheduler": {
-            "running": reminder_scheduler.running,
-            "mode": "local-process",
-        },
-    }
+class ChatPayload(BaseModel):
+    message: str
+    session_id: Optional[str] = "default"
 
+class ReminderCreatePayload(BaseModel):
+    title: Optional[str] = None
+    remind_at: Optional[str] = None
+    text: Optional[str] = None
+    run_at: Optional[str] = None
 
-@app.post("/api/reminders")
-def create_reminder(payload: dict[str, Any] = Body(...)):
-    if (
-        not isinstance(payload, dict)
-        or not isinstance(payload.get("text"), str)
-        or not isinstance(payload.get("run_at"), str)
-    ):
-        raise HTTPException(400, "'text' and 'run_at' must be strings.")
+class ReminderUpdatePayload(BaseModel):
+    completed: bool
+
+def parse_and_execute_reminder_intent(user_text: str) -> Optional[str]:
+    """Fallback intent parser if the LLM does not emit structured tool calls."""
+    match = re.search(
+        r"remind me to (.+?) (?:at|on|in) (.+)", user_text, re.IGNORECASE
+    )
+    if match:
+        title = match.group(1).strip()
+        remind_at = match.group(2).strip()
+        created = create_reminder(title=title, remind_at=remind_at)
+        return f"Reminder set: '{created['title']}' for {created['remind_at']}."
+    return None
+
+def run_existing_llm(user_message: str, history: list[dict[str, Any]], active_reminders: list[dict[str, Any]]) -> str:
+    """Run existing LLM inference + assistant tone logic without blocking FastAPI."""
     try:
-        _validate_recurrence(payload.get("recurrence"))
-        reminder = memory_store.create_reminder(
-            payload["text"],
-            payload["run_at"],
-            payload.get("recurrence"),
-            payload.get("chat_id"),
-        )
-        _schedule_reminder(reminder)
-        return JSONResponse(status_code=201, content=reminder)
-    except ValueError as error:
-        raise HTTPException(400, str(error)) from error
-
-
-@app.delete("/api/reminders/{reminder_id}")
-def cancel_reminder(reminder_id: str):
-    try:
-        reminder_scheduler.remove_job(reminder_id)
+        cmd_result = _handle_local_command(user_message, "default")
+        if cmd_result:
+            return cmd_result[0]
     except Exception:
         pass
-    if not memory_store.cancel_reminder(reminder_id):
-        raise HTTPException(404, "Reminder not found.")
-    return {"status": "cancelled"}
+
+    try:
+        ensure_model_loaded()
+        reminders_text = "\n".join(
+            f"- #{r.get('id', '')} {r.get('title', '')} (due {r.get('remind_at', '')})"
+            for r in active_reminders
+        ) if active_reminders else "No active reminders."
+
+        reminders_context = f"Live Database Reminders:\n{reminders_text}"
+        memories = _memories_for_prompt(user_message) or []
+        memories.append({"content": reminders_context})
+
+        context_messages = [
+            {"role": m.get("role", "user"), "content": m.get("content", "")}
+            for m in history
+            if m.get("role") and m.get("content")
+        ]
+
+        tokens = _token_budget(user_message)
+        reply = generate_response(
+            prompt=user_message,
+            max_new_tokens=tokens,
+            messages=context_messages,
+            memories=memories,
+        )
+        return reply.strip()
+    except Exception as exc:
+        print(f"[LLM Inference Warning] {exc}")
+        if active_reminders and any(k in user_message.lower() for k in ["remind", "task", "list", "what"]):
+            items = ", ".join(f"'{r['title']}' for {r['remind_at']}" for r in active_reminders)
+            return f"You currently have these active reminders: {items}."
+        return f"Acknowledged: '{user_message}'. How else can I assist with your reminders and schedule?"
+
+def run_existing_tts(text: str, output_path: str) -> None:
+    """Synthesize speech into WAV audio file."""
+    try:
+        from voice.tts import get_tts_engine, audio_to_wav_bytes
+        engine = get_tts_engine()
+        engine.load()
+        if engine.available:
+            audio_array = engine.synthesize(text)
+            if audio_array is not None and len(audio_array) > 0:
+                wav_bytes = audio_to_wav_bytes(audio_array)
+                with open(output_path, "wb") as f:
+                    f.write(wav_bytes)
+                return
+    except Exception as err:
+        print(f"[OmniVoice TTS Warning] {err}")
+
+    try:
+        import wave, struct, math
+        sr = 16000
+        duration = 0.4
+        with wave.open(output_path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sr)
+            frames = bytearray()
+            for i in range(int(sr * duration)):
+                val = int(2500 * math.sin(2 * math.pi * 130.81 * (i / sr)))
+                frames.extend(struct.pack("<h", val))
+            wf.writeframes(frames)
+    except Exception as wav_err:
+        print(f"[Fallback WAV Warning] {wav_err}")
+
+def transcribe_pcm_bytes(pcm_bytes: bytes) -> str:
+    """Transcribe 16 kHz mono 16-bit PCM bytes."""
+    try:
+        from voice.stt import get_stt
+        stt = get_stt()
+        return stt.transcribe(pcm_bytes)
+    except Exception as err:
+        print(f"[STT Warning] {err}")
+        return ""
+
+async def process_agent_turn(user_message: str, session_id: str = "default") -> dict:
+    user_message = user_message.strip()
+    save_message("user", user_message, session_id=session_id)
+
+    # 1. Check for direct reminder creation intent or tool execution
+    tool_notice = parse_and_execute_reminder_intent(user_message)
+
+    # 2. Fetch live DB state for agent context
+    active_reminders = list_reminders(include_completed=False)
+    history = get_recent_messages(session_id=session_id, limit=10)
+
+    # 3. Run existing LLM + assistant_tone logic in a background thread so FastAPI never freezes
+    if tool_notice:
+        reply_text = tool_notice
+    else:
+        reply_text = await asyncio.to_thread(
+            run_existing_llm, user_message, history, active_reminders
+        )
+
+    save_message("assistant", reply_text, session_id=session_id)
+
+    # 4. Run TTS generation in a thread and append a cache-busting timestamp
+    audio_url = None
+    try:
+        await asyncio.to_thread(run_existing_tts, reply_text, str(AUDIO_OUTPUT_PATH))
+        if AUDIO_OUTPUT_PATH.exists():
+            audio_url = f"/tts/audio.wav?t={int(time.time() * 1000)}"
+    except Exception as tts_err:
+        print(f"[TTS Warning] Audio generation failed: {tts_err}")
+
+    return {
+        "type": "agent_response",
+        "text": reply_text,
+        "audio_url": audio_url,
+        "reminders": list_reminders(include_completed=False),
+        "history": get_recent_messages(session_id=session_id, limit=20),
+    }
+
+@app.get("/api/reminders")
+async def api_get_reminders(include_completed: bool = False):
+    return {"reminders": list_reminders(include_completed=include_completed)}
+
+@app.post("/api/reminders")
+async def api_create_reminder(payload: ReminderCreatePayload):
+    title = (payload.title or payload.text or "").strip()
+    remind_at = (payload.remind_at or payload.run_at or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Reminder title is required")
+    reminder = create_reminder(title, remind_at)
+    return {"reminder": reminder, "reminders": list_reminders(False)}
+
+@app.patch("/api/reminders/{reminder_id}")
+async def api_update_reminder(reminder_id: int, payload: ReminderUpdatePayload):
+    updated = update_reminder_status(reminder_id, payload.completed)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Reminder not found")
+    return {"reminder": updated, "reminders": list_reminders(False)}
+
+@app.delete("/api/reminders/{reminder_id}")
+async def api_delete_reminder(reminder_id: int):
+    deleted = delete_reminder(reminder_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Reminder not found")
+    return {"deleted": True, "reminders": list_reminders(False)}
+
+@app.get("/api/history")
+async def api_get_history(session_id: str = "default"):
+    return {"messages": get_recent_messages(session_id=session_id, limit=50)}
+
+@app.post("/api/chat")
+async def api_chat(payload: ChatPayload):
+    if not payload.message or not payload.message.strip():
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
+    return await process_agent_turn(payload.message, payload.session_id or "default")
+
+@app.websocket("/ws")
+async def websocket_agent_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    await websocket.send_json({
+        "type": "connected",
+        "reminders": list_reminders(include_completed=False),
+        "history": get_recent_messages(limit=20),
+    })
+    try:
+        while True:
+            packet = await websocket.receive()
+            if "text" in packet and packet["text"]:
+                try:
+                    payload = json.loads(packet["text"])
+                    user_msg = payload.get("message") or payload.get("text") or ""
+                    session_id = payload.get("session_id", "default")
+                except json.JSONDecodeError:
+                    user_msg = packet["text"]
+                    session_id = "default"
+
+                if user_msg.strip():
+                    result = await process_agent_turn(user_msg, session_id=session_id)
+                    await websocket.send_json(result)
+
+            elif "bytes" in packet and packet["bytes"]:
+                pcm_bytes = packet["bytes"]
+                transcript = await asyncio.to_thread(transcribe_pcm_bytes, pcm_bytes)
+                if transcript and transcript.strip():
+                    await websocket.send_json({
+                        "type": "transcript",
+                        "text": transcript,
+                    })
+                    result = await process_agent_turn(transcript)
+                    await websocket.send_json(result)
+    except WebSocketDisconnect:
+        print("[WebSocket] Client disconnected")
+    except Exception as exc:
+        print(f"[WebSocket Error] {exc}")
+        try:
+            await websocket.send_json({"type": "error", "error": str(exc)})
+        except Exception:
+            pass
 
 
 @app.get("/api/notifications/{chat_id}")

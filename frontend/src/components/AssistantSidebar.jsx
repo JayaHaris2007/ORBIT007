@@ -12,6 +12,7 @@ import SpeakToggle from './voice/SpeakToggle';
 import ListenButton from './voice/ListenButton';
 import StopButton from './voice/StopButton';
 import LiveOverlay from './voice/LiveOverlay';
+import OrbitAgentView from './OrbitAgentView';
 
 const ACTIVE_CHAT_KEY = 'spidey_active_chat_id';
 const MINIMIZED_KEY = 'spidey_panel_minimized';
@@ -56,6 +57,7 @@ const AssistantSidebar = () => {
 
     const voice = useVoice();
     const [liveOpen, setLiveOpen] = useState(false);
+    const [orbitMode, setOrbitMode] = useState(false);
     const submitPromptRef = useRef(null);
 
     const handleSpeechTranscript = useCallback((text) => {
@@ -362,6 +364,18 @@ const AssistantSidebar = () => {
                             <Radio size={12} className="text-orange-400 animate-pulse" />
                             <span>Live</span>
                         </button>
+                        <button
+                            type="button"
+                            onClick={() => setOrbitMode(!orbitMode)}
+                            className={`flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-semibold transition-colors ${
+                                orbitMode
+                                    ? 'border-orange-400 bg-orange-500 text-black shadow-[0_0_10px_rgba(255,106,26,0.5)]'
+                                    : 'border-white/10 bg-white/5 text-neutral-300 hover:border-orange-400/40 hover:text-white'
+                            }`}
+                            title="Toggle ORBIT007 Agent Mode (WebSocket, AudioWorklet & DB Sync)"
+                        >
+                            <span>ORBIT007</span>
+                        </button>
                     </div>
                 </div>
 
@@ -400,7 +414,13 @@ const AssistantSidebar = () => {
                     </div>
                 )}
 
-                <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 pb-4">
+                {orbitMode ? (
+                    <div className="flex-1 min-h-0 flex flex-col">
+                        <OrbitAgentView />
+                    </div>
+                ) : (
+                    <>
+                    <div className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 pb-4">
                     {!messages.length && !loading && (
                         <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
                             <div className="grid h-12 w-12 place-items-center rounded-2xl border border-orange-400/20 bg-orange-500/10 text-orange-300"><Bot size={22} /></div>
@@ -501,6 +521,8 @@ const AssistantSidebar = () => {
                     <p className="mt-2 px-1 text-[10px] text-neutral-600">Enter to send · Shift + Enter for a new line</p>
                     {error && <p className="mt-2 px-1 text-xs text-red-300">{error}</p>}
                 </form>
+                </>
+                )}
             </aside>
 
             <LiveOverlay

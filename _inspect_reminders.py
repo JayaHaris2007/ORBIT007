@@ -1,11 +1,10 @@
-import sqlite3
-from datetime import datetime, timezone
+from db import DB_PATH, init_db, list_reminders
 
-connection = sqlite3.connect("assistant.db")
-rows = connection.execute(
-    "SELECT id, text, run_at, recurrence, active, chat_id IS NOT NULL FROM reminders ORDER BY run_at"
-).fetchall()
-print("total reminders:", len(rows))
-for row in rows:
-    print(row[4], row[3], row[2], "|", row[1][:40])
-print("active:", connection.execute("SELECT COUNT(*) FROM reminders WHERE active=1").fetchone()[0])
+init_db()
+print(f"Inspecting database at: {DB_PATH}")
+reminders = list_reminders(include_completed=True)
+print("total reminders:", len(reminders))
+for r in reminders:
+    print(r.get("id"), r.get("completed"), r.get("remind_at"), "|", r.get("title"))
+active = list_reminders(include_completed=False)
+print("active:", len(active))

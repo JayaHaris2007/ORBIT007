@@ -423,9 +423,10 @@ export const learningService = {
         return normalizeProgress(await apiRequest('/api/learning/progress'));
     },
 
-    getNext: async () => {
+    getNext: async (limit = 3) => {
         if (MOCK_ENABLED) return (await mockNext()).next.map(normalizeNext);
-        return (await apiRequest('/api/learning/next')).next.map(normalizeNext);
+        const query = limit ? `?limit=${limit}` : '';
+        return (await apiRequest(`/api/learning/next${query}`)).next.map(normalizeNext);
     },
 
     listSuggestedLinks: async () => {

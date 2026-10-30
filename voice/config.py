@@ -75,11 +75,11 @@ TTS_SHARE_QWEN_LOCK = _bool("TTS_SHARE_QWEN_LOCK", False)
 TTS_MODEL_ID = os.environ.get("TTS_MODEL_ID", "k2-fsa/OmniVoice").strip() or "k2-fsa/OmniVoice"
 
 # Reference voice clip or voice design
-_default_ref = str(ROOT_DIR / "TTS" / "audio.wav")
-TTS_REF_AUDIO = os.environ.get("TTS_REF_AUDIO", _default_ref).strip()
+_default_ref = ""
+TTS_REF_AUDIO = os.environ.get("TTS_REF_AUDIO", "").strip()
 TTS_REF_TEXT = os.environ.get("TTS_REF_TEXT", "the box was thrown beside the path").strip()
 TTS_INSTRUCT = os.environ.get(
-    "TTS_INSTRUCT", "female, young adult, moderate pitch, american accent"
+    "TTS_INSTRUCT", "male, low pitch, young adult, american accent"
 ).strip()
 TTS_STEPS = _int("TTS_STEPS", 16)
 TTS_SPEED = _float("TTS_SPEED", 1.0, minimum=0.2)

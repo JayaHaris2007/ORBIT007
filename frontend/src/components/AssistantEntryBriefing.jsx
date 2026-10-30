@@ -20,6 +20,13 @@ import {
     Zap,
 } from 'lucide-react';
 import { buildAssistantBriefing } from '../utils/briefingUtils';
+import {
+    fetchTTSAudio,
+    AudioQueue,
+    splitSentencesClient,
+    fetchVoiceSettings,
+    stopVoiceTurn,
+} from '../services/voiceService';
 
 const ENTRY_DISMISSED_KEY = 'spidey_entry_briefing_seen_v1';
 
@@ -47,26 +54,23 @@ export function triggerAssistantPrompt(promptText) {
  */
 function useBriefingSpeech(textToSpeak) {
     const [speaking, setSpeaking] = useState(false);
+    const audioQueueRef = useRef(null);
+    const abortControllerRef = useRef(null);
 
-    const stopSpeech = useCallback(() => {
-        if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-            window.speechSynthesis.cancel();
-        }
-        setSpeaking(false);
-    }, []);
+    if (!audioQueueRef.current && typeof window !== 'undefined') {
+        audioQueueRef.current = new AudioQueue();
+    }
 
-    const toggleSpeech = useCallback(() => {
-        if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;
-        if (speaking) {
-            window.speechSynthesis.cancel();
+    const fallbackBrowserSpeech = useCallback((text) => {
+        if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
             setSpeaking(false);
             return;
         }
         try {
             window.speechSynthesis.cancel();
-            const utterance = new SpeechSynthesisUtterance(textToSpeak);
-            utterance.rate = 1.02;
-            utterance.pitch = 0.98;
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.rate = 1.0;
+            utterance.pitch = 0.95;
             utterance.onend = () => setSpeaking(false);
             utterance.onerror = () => setSpeaking(false);
             setSpeaking(true);
@@ -74,7 +78,73 @@ function useBriefingSpeech(textToSpeak) {
         } catch {
             setSpeaking(false);
         }
-    }, [speaking, textToSpeak]);
+    }, []);
+
+    const stopSpeech = useCallback(() => {
+        if (abortControllerRef.current) {
+            abortControllerRef.current.abort();
+            abortControllerRef.current = null;
+        }
+        if (audioQueueRef.current) {
+            audioQueueRef.current.stop();
+        }
+        stopVoiceTurn().catch(() => {});
+        if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+            window.speechSynthesis.cancel();
+        }
+        setSpeaking(false);
+    }, []);
+
+    const toggleSpeech = useCallback(async () => {
+        if (speaking) {
+            stopSpeech();
+            return;
+        }
+        if (!textToSpeak || !textToSpeak.trim()) return;
+
+        let engineReady = false;
+        try {
+            const settings = await fetchVoiceSettings();
+            if (settings && (settings.engine_ready || settings.available)) {
+                engineReady = true;
+            }
+        } catch {
+            engineReady = false;
+        }
+
+        if (!engineReady) {
+            fallbackBrowserSpeech(textToSpeak);
+            return;
+        }
+
+        const controller = new AbortController();
+        abortControllerRef.current = controller;
+        const queue = audioQueueRef.current;
+        const currentEpoch = queue.epoch;
+
+        queue.onPlay = () => setSpeaking(true);
+        queue.onIdle = () => setSpeaking(false);
+        setSpeaking(true);
+
+        try {
+            const sentences = splitSentencesClient(textToSpeak);
+            if (!sentences.length) {
+                setSpeaking(false);
+                return;
+            }
+
+            for (const sentence of sentences) {
+                if (controller.signal.aborted) break;
+                const wavBuffer = await fetchTTSAudio(sentence, controller.signal);
+                if (controller.signal.aborted) break;
+                await queue.push(wavBuffer, currentEpoch);
+            }
+        } catch (err) {
+            if (controller.signal.aborted) return;
+            console.warn('OmniVoice TTS playback error, falling back to Web Speech:', err);
+            fallbackBrowserSpeech(textToSpeak);
+        }
+    }, [speaking, textToSpeak, stopSpeech, fallbackBrowserSpeech]);
 
     useEffect(() => () => stopSpeech(), [stopSpeech]);
 

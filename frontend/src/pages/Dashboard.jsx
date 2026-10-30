@@ -66,7 +66,7 @@ const Dashboard = () => {
                 taskService.getTasks(true),
                 habitService.getGamification(),
                 learningService.getProgress().catch(() => null),
-                learningService.getNext().catch(() => []),
+                learningService.getNext(3).catch(() => []),
             ]);
             setHabits(habitData);
             setTasks(taskData);
@@ -131,7 +131,7 @@ const Dashboard = () => {
             await learningService.updateTopic(topic.topicId, { status: 'learning' });
             const [progressData, nextData] = await Promise.all([
                 learningService.getProgress().catch(() => null),
-                learningService.getNext().catch(() => []),
+                learningService.getNext(3).catch(() => []),
             ]);
             setLearningProgress(progressData);
             setNextTopics(nextData || []);
