@@ -3888,6 +3888,11 @@ def generate_response(
                 "for advice questions, give 3-5 specific suggestions and do "
                 "not just list pending items):\n" + extra
             )
+        if os.environ.get("ORBIT_LLM_TOOLS", "0") == "1":
+            system_prompt += (
+                "\nYou can create or delete reminders using tool calls. "
+                "Output: <tool_call>{\"action\": \"create_reminder\", \"title\": \"...\", \"when\": \"...\"}</tool_call>"
+            )
         model_context = select_generation_context(context, prompt)
         model_messages = [{"role": "system", "content": system_prompt}, *model_context]
         process_started = time.perf_counter()
@@ -4085,6 +4090,9 @@ async def health():
         "load_seconds": round(load_seconds, 2) if load_seconds is not None else 0.0,
         "database": str(DB_PATH),
         "semantic_memory": os.environ.get("AI_ENABLE_SEMANTIC_MEMORY", "1") != "0",
+        "scheduler_running": reminder_scheduler.running if "reminder_scheduler" in globals() else False,
+        "scheduled_jobs": len(reminder_scheduler.get_jobs()) if "reminder_scheduler" in globals() and reminder_scheduler.running else 0,
+        "active_ws_clients": len(ws_manager.active) if "ws_manager" in globals() else 0,
         "models": REGISTRY.get_status_summary() if hasattr(REGISTRY, "get_status_summary") else {},
     }
 
@@ -4478,7 +4486,7 @@ def run_existing_tts(text: str, output_path: str) -> None:
                     f.write(wav_bytes)
                 return
     except Exception as err:
-        print(f"[OmniVoice TTS Warning] {err}")
+        logging.getLogger("orbit007").warning("OmniVoice TTS warning: %s", err)
 
     try:
         import wave, struct, math
@@ -4494,7 +4502,7 @@ def run_existing_tts(text: str, output_path: str) -> None:
                 frames.extend(struct.pack("<h", val))
             wf.writeframes(frames)
     except Exception as wav_err:
-        print(f"[Fallback WAV Warning] {wav_err}")
+        logging.getLogger("orbit007").warning("Fallback WAV warning: %s", wav_err)
 
 def transcribe_pcm_bytes(pcm_bytes: bytes) -> str:
     """Transcribe 16 kHz mono 16-bit PCM bytes."""
@@ -4503,7 +4511,7 @@ def transcribe_pcm_bytes(pcm_bytes: bytes) -> str:
         stt = get_stt()
         return stt.transcribe(pcm_bytes)
     except Exception as err:
-        print(f"[STT Warning] {err}")
+        logging.getLogger("orbit007").warning("STT failed: %s", err)
         return ""
 
 class ConnectionManager:
@@ -4557,6 +4565,46 @@ def _cleanup_tts(max_age_s: int = 600) -> None:
             pass
 
 
+def _handle_llm_tool_calls(
+    llm_reply: str, user_message: str, chat_id: str | None = None
+) -> str:
+    """Parse and execute at most one whitelisted tool call if ORBIT_LLM_TOOLS=1 and intent words are present."""
+    if os.environ.get("ORBIT_LLM_TOOLS", "0") != "1":
+        return llm_reply
+
+    intent_words = ("remind", "reminder", "alarm", "alert me")
+    user_lower = user_message.lower()
+    if not any(word in user_lower for word in intent_words):
+        return re.sub(r"<tool_call>.*?</tool_call>", "", llm_reply, flags=re.DOTALL).strip()
+
+    match = re.search(r"<tool_call>(.*?)</tool_call>", llm_reply, re.DOTALL)
+    if not match:
+        return llm_reply
+
+    raw_json = match.group(1).strip()
+    cleaned_reply = re.sub(r"<tool_call>.*?</tool_call>", "", llm_reply, flags=re.DOTALL).strip()
+
+    try:
+        call_data = json.loads(raw_json)
+        action = call_data.get("action")
+        if action == "create_reminder":
+            title = call_data.get("title") or call_data.get("text")
+            when = call_data.get("when") or call_data.get("remind_at") or call_data.get("run_at")
+            recurrence = call_data.get("recurrence")
+            if title and when:
+                _create_reminder_unified(
+                    str(title).strip(), str(when).strip(), recurrence=recurrence, chat_id=chat_id
+                )
+        elif action == "delete_reminder":
+            rem_id = call_data.get("reminder_id") or call_data.get("id")
+            if rem_id:
+                _cancel_reminder_unified(str(rem_id).strip())
+    except Exception as exc:
+        logging.getLogger("orbit007").warning("Error executing LLM tool call: %s", exc)
+
+    return cleaned_reply
+
+
 async def process_agent_turn(
     user_message: str, session_id: str = "default", chat_id: str | None = None
 ) -> dict:
@@ -4581,6 +4629,7 @@ async def process_agent_turn(
         reply_text = await asyncio.to_thread(
             run_existing_llm, user_message, history, active_reminders
         )
+        reply_text = _handle_llm_tool_calls(reply_text, user_message, chat_id=target_chat)
 
     save_message("assistant", reply_text, session_id=session_id)
 
@@ -4773,6 +4822,10 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
     args = parse_arguments()
     if args.server:
         if args.host == "0.0.0.0" and not os.environ.get("ORBIT_API_TOKEN", "").strip():
