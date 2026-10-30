@@ -110,7 +110,7 @@ def test_app_schedules_weekly_nudge(learning_db):
     app.reminder_scheduler.add_job.assert_called()
     (_, trigger), kwargs = app.reminder_scheduler.add_job.call_args
     assert kwargs["id"] == app.WEEKLY_LEARNING_NUDGE_JOB
-    assert trigger.timezone.zone == "Asia/Kolkata"
+    assert getattr(trigger.timezone, "zone", getattr(trigger.timezone, "key", str(trigger.timezone))) == "Asia/Kolkata"
 
 
 def test_weekly_job_skips_when_learning_not_initialized(monkeypatch):

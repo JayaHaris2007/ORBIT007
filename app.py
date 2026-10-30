@@ -457,6 +457,79 @@ def _restore_reminders(provider: str = "local") -> None:
         reminder_scheduler.start()
 
 
+DEFAULT_CHAT_ID = "default"
+
+
+def _ensure_chat_exists(chat_id: str) -> None:
+    if not memory_store.chat_exists(chat_id):
+        now_iso = datetime.now(timezone.utc).isoformat()
+        with memory_store.connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO conversations (id, title, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                (chat_id, "Default Chat", now_iso, now_iso),
+            )
+
+
+def _reminder_view(r: dict[str, Any]) -> dict[str, Any]:
+    """MemoryStore row -> the shape the frontend already expects (legacy keys kept)."""
+    return {
+        "id": r["id"],
+        "title": r["text"],
+        "text": r["text"],
+        "remind_at": r["run_at"],
+        "run_at": r["run_at"],
+        "recurrence": r.get("recurrence"),
+        "completed": 0 if r.get("active", 1) else 1,
+        "chat_id": r.get("chat_id"),
+    }
+
+
+def _live_reminders() -> list[dict[str, Any]]:
+    return [_reminder_view(r) for r in memory_store.list_reminders()]
+
+
+def _create_reminder_unified(
+    title: str,
+    when: str,
+    recurrence: str | None = None,
+    chat_id: str | None = None,
+) -> dict[str, Any]:
+    _validate_recurrence(recurrence)
+    parsed = _parse_reminder_time(when)
+    if parsed is None:
+        raise ValueError(f"I could not understand the reminder time: {when!r}.")
+    target_chat = chat_id or DEFAULT_CHAT_ID
+    _ensure_chat_exists(target_chat)
+    row = memory_store.create_reminder(
+        title, parsed.isoformat(), recurrence, target_chat
+    )
+    _schedule_reminder(row)
+    return _reminder_view(row)
+
+
+def _cancel_reminder_unified(reminder_id: str) -> bool:
+    ok = memory_store.cancel_reminder(reminder_id)
+    try:
+        reminder_scheduler.remove_job(reminder_id)
+    except Exception:  # job already fired or never existed
+        pass
+    return ok
+
+
+def _migrate_legacy_reminders() -> int:
+    from db import list_reminders as legacy_list, update_reminder_status as legacy_done
+    moved = 0
+    for r in legacy_list(include_completed=False):
+        try:
+            _create_reminder_unified(r["title"], r["remind_at"])
+        except Exception as err:
+            logging.getLogger("orbit007").warning("legacy reminder %s skipped: %s", r.get("id"), err)
+            continue
+        legacy_done(r["id"], True)  # never migrate twice
+        moved += 1
+    return moved
+
+
 def _parse_reminder_time(value: str) -> datetime | None:
     rel_match = re.fullmatch(
         r"in\s+(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)",
@@ -490,6 +563,7 @@ def _parse_reminder_time(value: str) -> datetime | None:
     settings = {
         "TIMEZONE": "Asia/Kolkata",
         "RETURN_AS_TIMEZONE_AWARE": True,
+        "PREFER_DATES_FROM": "future",
     }
     if not day_part_match:
         parsed_base = dateparser.parse(value, settings=settings)
@@ -504,18 +578,6 @@ def _parse_reminder_time(value: str) -> datetime | None:
             )
         )
         if not has_explicit_date and parsed_base <= now:
-            # If the user specified a time that passed recently today (within 4 hours),
-            # don't silently bump to tomorrow. Alert the user so they catch typos (like 20:03 for 21:03).
-            if now - parsed_base <= timedelta(hours=4):
-                time_str = parsed_base.strftime("%I:%M %p").lstrip("0")
-                next_hint = (now + timedelta(minutes=5)).strftime("%H:%M")
-                raise ValueError(
-                    f"'{value}' ({time_str}) has already passed today. "
-                    f"If you want this reminder tomorrow, say 'tomorrow at {value}', "
-                    f"or specify a future time tonight (e.g. 'in 5 minutes' or 'at {next_hint}')."
-                )
-            parsed_base += timedelta(days=1)
-        elif parsed_base <= now and not has_explicit_date:
             parsed_base += timedelta(days=1)
         return parsed_base
 
@@ -1091,7 +1153,7 @@ def _is_task_list_request(prompt: str) -> bool:
     if re.match(
         r"^(?:add|create|new|complete|completed|finish|finished|mark|"
         r"check off|delete|remove|rename|retitle|reopen|uncomplete|set|change|"
-        r"update|make|cancel)\b",
+        r"update|make|cancel|done\s+with)\b",
         normalized_prompt,
     ):
         return False
@@ -1299,7 +1361,7 @@ def _find_habit(habit_title: str) -> dict[str, Any] | None:
 def _parse_task_completion(prompt: str) -> str | None:
     """Match an explicit 'complete task <number|title>' command."""
     match = re.fullmatch(
-        r"(?:complete|completed|finish|finished|mark\s+done|check\s+off)\s+"
+        r"(?:complete|completed|finish|finished|mark\s+done|check\s+off|done\s+with)\s+"
         r"(?:(?:the|my)\s+)?tasks?\s+(.+)",
         _normalize_command(prompt),
         re.IGNORECASE,
@@ -3872,6 +3934,12 @@ async def lifespan(_: FastAPI):
         )
         await asyncio.to_thread(ensure_model_loaded)
         _restore_reminders(provider="local")
+        try:
+            migrated_count = _migrate_legacy_reminders()
+            if migrated_count:
+                logging.getLogger("orbit007").info("Migrated %d legacy reminders to MemoryStore", migrated_count)
+        except Exception as e:
+            logging.getLogger("orbit007").warning("Legacy reminder migration error: %s", e)
         init_learning_module("local")
         purge_voice_tmp()
 
@@ -4287,10 +4355,13 @@ class ReminderCreatePayload(BaseModel):
     remind_at: Optional[str] = None
     text: Optional[str] = None
     run_at: Optional[str] = None
+    recurrence: Optional[str] = None
+    chat_id: Optional[str] = None
 
 class ReminderUpdatePayload(BaseModel):
-    completed: bool
+    completed: bool = True
 
+# legacy, unused
 def parse_and_execute_reminder_intent(user_text: str) -> Optional[str]:
     """Fallback intent parser if the LLM does not emit structured tool calls."""
     match = re.search(
@@ -4306,20 +4377,14 @@ def parse_and_execute_reminder_intent(user_text: str) -> Optional[str]:
 def run_existing_llm(user_message: str, history: list[dict[str, Any]], active_reminders: list[dict[str, Any]]) -> str:
     """Run existing LLM inference + assistant tone logic without blocking FastAPI."""
     try:
-        cmd_result = _handle_local_command(user_message, "default")
-        if cmd_result:
-            return cmd_result[0]
-    except Exception:
-        pass
-
-    try:
         ensure_model_loaded()
+        now_str = datetime.now(LOCAL_TIMEZONE).strftime("%Y-%m-%d %I:%M %p %Z")
         reminders_text = "\n".join(
             f"- #{r.get('id', '')} {r.get('title', '')} (due {r.get('remind_at', '')})"
             for r in active_reminders
         ) if active_reminders else "No active reminders."
 
-        reminders_context = f"Live Database Reminders:\n{reminders_text}"
+        reminders_context = f"Current local time: {now_str}\nLive Database Reminders:\n{reminders_text}"
         memories = _memories_for_prompt(user_message) or []
         memories.append({"content": reminders_context})
 
@@ -4338,7 +4403,7 @@ def run_existing_llm(user_message: str, history: list[dict[str, Any]], active_re
         )
         return reply.strip()
     except Exception as exc:
-        print(f"[LLM Inference Warning] {exc}")
+        logging.getLogger("orbit007").warning("LLM inference failed: %s", exc)
         if active_reminders and any(k in user_message.lower() for k in ["remind", "task", "list", "what"]):
             items = ", ".join(f"'{r['title']}' for {r['remind_at']}" for r in active_reminders)
             return f"You currently have these active reminders: {items}."
@@ -4386,47 +4451,53 @@ def transcribe_pcm_bytes(pcm_bytes: bytes) -> str:
         print(f"[STT Warning] {err}")
         return ""
 
-async def process_agent_turn(user_message: str, session_id: str = "default") -> dict:
+async def process_agent_turn(
+    user_message: str, session_id: str = "default", chat_id: str | None = None
+) -> dict:
     user_message = user_message.strip()
+    target_chat = chat_id or session_id or DEFAULT_CHAT_ID
+    _ensure_chat_exists(target_chat)
     save_message("user", user_message, session_id=session_id)
 
-    # 1. Check for direct reminder creation intent or tool execution
-    tool_notice = parse_and_execute_reminder_intent(user_message)
+    # 1. Order: _handle_local_command first (rules-first pipeline)
+    reply_text: str | None = None
+    try:
+        cmd_result = await asyncio.to_thread(_handle_local_command, user_message, target_chat)
+        if cmd_result:
+            reply_text = cmd_result[0]
+    except Exception:
+        logging.getLogger("orbit007").exception("Local command handling failed for %r", user_message)
 
-    # 2. Fetch live DB state for agent context
-    active_reminders = list_reminders(include_completed=False)
-    history = get_recent_messages(session_id=session_id, limit=10)
-
-    # 3. Run existing LLM + assistant_tone logic in a background thread so FastAPI never freezes
-    if tool_notice:
-        reply_text = tool_notice
-    else:
+    # 2. If no local command match, route to LLM
+    active_reminders = _live_reminders()
+    if reply_text is None:
+        history = get_recent_messages(session_id=session_id, limit=10)
         reply_text = await asyncio.to_thread(
             run_existing_llm, user_message, history, active_reminders
         )
 
     save_message("assistant", reply_text, session_id=session_id)
 
-    # 4. Run TTS generation in a thread and append a cache-busting timestamp
+    # 3. Audio generation placeholder (updated in Phase 2 with unique audio)
     audio_url = None
     try:
         await asyncio.to_thread(run_existing_tts, reply_text, str(AUDIO_OUTPUT_PATH))
         if AUDIO_OUTPUT_PATH.exists():
             audio_url = f"/tts/audio.wav?t={int(time.time() * 1000)}"
     except Exception as tts_err:
-        print(f"[TTS Warning] Audio generation failed: {tts_err}")
+        logging.getLogger("orbit007").warning("TTS audio generation failed: %s", tts_err)
 
     return {
         "type": "agent_response",
         "text": reply_text,
         "audio_url": audio_url,
-        "reminders": list_reminders(include_completed=False),
+        "reminders": _live_reminders(),
         "history": get_recent_messages(session_id=session_id, limit=20),
     }
 
 @app.get("/api/reminders")
 async def api_get_reminders(include_completed: bool = False):
-    return {"reminders": list_reminders(include_completed=include_completed)}
+    return {"reminders": _live_reminders()}
 
 @app.post("/api/reminders")
 async def api_create_reminder(payload: ReminderCreatePayload):
@@ -4434,22 +4505,29 @@ async def api_create_reminder(payload: ReminderCreatePayload):
     remind_at = (payload.remind_at or payload.run_at or "").strip()
     if not title:
         raise HTTPException(status_code=400, detail="Reminder title is required")
-    reminder = create_reminder(title, remind_at)
-    return {"reminder": reminder, "reminders": list_reminders(False)}
+    if not remind_at:
+        raise HTTPException(status_code=400, detail="Reminder time is required")
+    try:
+        reminder = _create_reminder_unified(
+            title, remind_at, recurrence=payload.recurrence, chat_id=payload.chat_id
+        )
+        return {"reminder": reminder, "reminders": _live_reminders()}
+    except ValueError as err:
+        raise HTTPException(status_code=400, detail=str(err))
 
 @app.patch("/api/reminders/{reminder_id}")
-async def api_update_reminder(reminder_id: int, payload: ReminderUpdatePayload):
-    updated = update_reminder_status(reminder_id, payload.completed)
-    if not updated:
+async def api_update_reminder(reminder_id: str, payload: ReminderUpdatePayload):
+    ok = _cancel_reminder_unified(reminder_id)
+    if not ok:
         raise HTTPException(status_code=404, detail="Reminder not found")
-    return {"reminder": updated, "reminders": list_reminders(False)}
+    return {"status": "success", "reminders": _live_reminders()}
 
 @app.delete("/api/reminders/{reminder_id}")
-async def api_delete_reminder(reminder_id: int):
-    deleted = delete_reminder(reminder_id)
-    if not deleted:
+async def api_delete_reminder(reminder_id: str):
+    ok = _cancel_reminder_unified(reminder_id)
+    if not ok:
         raise HTTPException(status_code=404, detail="Reminder not found")
-    return {"deleted": True, "reminders": list_reminders(False)}
+    return {"deleted": True, "reminders": _live_reminders()}
 
 @app.get("/api/history")
 async def api_get_history(session_id: str = "default"):
@@ -4466,7 +4544,7 @@ async def websocket_agent_endpoint(websocket: WebSocket):
     await websocket.accept()
     await websocket.send_json({
         "type": "connected",
-        "reminders": list_reminders(include_completed=False),
+        "reminders": _live_reminders(),
         "history": get_recent_messages(limit=20),
     })
     try:
@@ -4477,12 +4555,14 @@ async def websocket_agent_endpoint(websocket: WebSocket):
                     payload = json.loads(packet["text"])
                     user_msg = payload.get("message") or payload.get("text") or ""
                     session_id = payload.get("session_id", "default")
+                    chat_id = payload.get("chat_id")
                 except json.JSONDecodeError:
                     user_msg = packet["text"]
                     session_id = "default"
+                    chat_id = None
 
                 if user_msg.strip():
-                    result = await process_agent_turn(user_msg, session_id=session_id)
+                    result = await process_agent_turn(user_msg, session_id=session_id, chat_id=chat_id)
                     await websocket.send_json(result)
 
             elif "bytes" in packet and packet["bytes"]:
