@@ -290,6 +290,27 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 
+def _push_reminder_alert(reminder: dict[str, Any], content: str) -> None:
+    if MAIN_LOOP is None or not ws_manager.active:
+        return
+    async def _go() -> None:
+        try:
+            audio_url = await generate_tts_url(content)
+            await ws_manager.broadcast({
+                "type": "reminder_alert",
+                "reminder_id": reminder["id"],
+                "text": content,
+                "audio_url": audio_url,
+                "reminders": _live_reminders(),
+            })
+        except Exception as exc:
+            logging.getLogger("orbit007").warning("Failed in _push_reminder_alert: %s", exc)
+    try:
+        asyncio.run_coroutine_threadsafe(_go(), MAIN_LOOP)
+    except Exception as exc:
+        logging.getLogger("orbit007").warning("Failed to schedule _push_reminder_alert: %s", exc)
+
+
 def _run_reminder(reminder_id: str) -> None:
     reminder = memory_store.get_reminder(reminder_id)
     if not reminder or not reminder["active"] or not reminder["chat_id"]:
@@ -299,6 +320,10 @@ def _run_reminder(reminder_id: str) -> None:
         reminder["text"], name=_user_name(_user_fact_memories())
     )
     memory_store.add_notification(reminder["chat_id"], reminder_id, content)
+    try:
+        _push_reminder_alert(reminder, content)
+    except Exception as exc:
+        logging.getLogger("orbit007").warning("Push reminder alert error: %s", exc)
     if not reminder.get("recurrence"):
         memory_store.cancel_reminder(reminder_id)
 
@@ -3920,6 +3945,9 @@ def generate_response(
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    global MAIN_LOOP
+    MAIN_LOOP = asyncio.get_running_loop()
+    _cleanup_tts()
     init_db()
     from runtime.guard import acquire_model_process_lock, release_model_process_lock
     acquire_model_process_lock()
@@ -4451,6 +4479,57 @@ def transcribe_pcm_bytes(pcm_bytes: bytes) -> str:
         print(f"[STT Warning] {err}")
         return ""
 
+class ConnectionManager:
+    def __init__(self) -> None:
+        self.active: list[WebSocket] = []
+
+    async def connect(self, ws: WebSocket) -> None:
+        await ws.accept()
+        self.active.append(ws)
+
+    def disconnect(self, ws: WebSocket) -> None:
+        if ws in self.active:
+            self.active.remove(ws)
+
+    async def broadcast(self, payload: dict) -> None:
+        for ws in list(self.active):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                self.disconnect(ws)
+
+
+ws_manager = ConnectionManager()
+MAIN_LOOP: asyncio.AbstractEventLoop | None = None
+_tts_lock: asyncio.Lock | None = None
+
+
+async def generate_tts_url(text: str) -> str | None:
+    global _tts_lock
+    if not text or not text.strip():
+        return None
+    _tts_lock = _tts_lock or asyncio.Lock()
+    name = f"reply_{uuid.uuid4().hex[:12]}.wav"
+    path = TTS_DIR / name
+    try:
+        async with _tts_lock:  # TTS engine is not guaranteed thread-safe
+            await asyncio.to_thread(run_existing_tts, text, str(path))
+        return f"/tts/{name}" if path.exists() else None
+    except Exception:
+        logging.getLogger("orbit007").exception("TTS failed")
+        return None
+
+
+def _cleanup_tts(max_age_s: int = 600) -> None:
+    cutoff = time.time() - max_age_s
+    for f in TTS_DIR.glob("reply_*.wav"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+        except OSError:
+            pass
+
+
 async def process_agent_turn(
     user_message: str, session_id: str = "default", chat_id: str | None = None
 ) -> dict:
@@ -4478,14 +4557,9 @@ async def process_agent_turn(
 
     save_message("assistant", reply_text, session_id=session_id)
 
-    # 3. Audio generation placeholder (updated in Phase 2 with unique audio)
-    audio_url = None
-    try:
-        await asyncio.to_thread(run_existing_tts, reply_text, str(AUDIO_OUTPUT_PATH))
-        if AUDIO_OUTPUT_PATH.exists():
-            audio_url = f"/tts/audio.wav?t={int(time.time() * 1000)}"
-    except Exception as tts_err:
-        logging.getLogger("orbit007").warning("TTS audio generation failed: %s", tts_err)
+    # 3. Audio generation: per-reply unique audio file
+    audio_url = await generate_tts_url(reply_text)
+    _cleanup_tts()
 
     return {
         "type": "agent_response",
@@ -4541,48 +4615,59 @@ async def api_chat(payload: ChatPayload):
 
 @app.websocket("/ws")
 async def websocket_agent_endpoint(websocket: WebSocket):
-    await websocket.accept()
-    await websocket.send_json({
-        "type": "connected",
-        "reminders": _live_reminders(),
-        "history": get_recent_messages(limit=20),
-    })
+    await ws_manager.connect(websocket)
     try:
+        await websocket.send_json({
+            "type": "connected",
+            "reminders": _live_reminders(),
+            "history": get_recent_messages(limit=20),
+        })
         while True:
             packet = await websocket.receive()
-            if "text" in packet and packet["text"]:
-                try:
-                    payload = json.loads(packet["text"])
-                    user_msg = payload.get("message") or payload.get("text") or ""
-                    session_id = payload.get("session_id", "default")
-                    chat_id = payload.get("chat_id")
-                except json.JSONDecodeError:
-                    user_msg = packet["text"]
-                    session_id = "default"
-                    chat_id = None
-
-                if user_msg.strip():
-                    result = await process_agent_turn(user_msg, session_id=session_id, chat_id=chat_id)
-                    await websocket.send_json(result)
-
-            elif "bytes" in packet and packet["bytes"]:
+            if "bytes" in packet and packet["bytes"]:
                 pcm_bytes = packet["bytes"]
+                if len(pcm_bytes) > 2 * 1024 * 1024:
+                    await websocket.send_json({"type": "error", "error": "Binary payload exceeds 2 MB limit"})
+                    continue
                 transcript = await asyncio.to_thread(transcribe_pcm_bytes, pcm_bytes)
                 if transcript and transcript.strip():
                     await websocket.send_json({
                         "type": "transcript",
                         "text": transcript,
                     })
+                    await websocket.send_json({"type": "status", "state": "thinking"})
                     result = await process_agent_turn(transcript)
                     await websocket.send_json(result)
+
+            elif "text" in packet and packet["text"]:
+                try:
+                    payload = json.loads(packet["text"])
+                except json.JSONDecodeError:
+                    payload = {"message": packet["text"]}
+
+                msg_type = payload.get("type")
+                if msg_type == "ping":
+                    await websocket.send_json({"type": "pong"})
+                    continue
+
+                user_msg = payload.get("message") or payload.get("text") or ""
+                session_id = payload.get("session_id", "default")
+                chat_id = payload.get("chat_id")
+
+                if user_msg.strip():
+                    await websocket.send_json({"type": "status", "state": "thinking"})
+                    result = await process_agent_turn(user_msg, session_id=session_id, chat_id=chat_id)
+                    await websocket.send_json(result)
     except WebSocketDisconnect:
-        print("[WebSocket] Client disconnected")
+        logging.getLogger("orbit007").info("WebSocket client disconnected")
     except Exception as exc:
-        print(f"[WebSocket Error] {exc}")
+        logging.getLogger("orbit007").warning("WebSocket error: %s", exc)
         try:
             await websocket.send_json({"type": "error", "error": str(exc)})
         except Exception:
             pass
+    finally:
+        ws_manager.disconnect(websocket)
 
 
 @app.get("/api/notifications/{chat_id}")

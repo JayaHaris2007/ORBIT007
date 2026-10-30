@@ -54,7 +54,15 @@ export function useOrbitAgent() {
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
-      ws.onopen = () => setConnected(true);
+      let pingTimer = null;
+      ws.onopen = () => {
+        setConnected(true);
+        pingTimer = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, 30000);
+      };
 
       ws.onmessage = (event) => {
         try {
@@ -62,8 +70,19 @@ export function useOrbitAgent() {
           if (data.type === 'connected') {
             if (data.reminders) setReminders(data.reminders);
             if (data.history) setMessages(data.history);
+          } else if (data.type === 'status') {
+            if (data.state === 'thinking') setIsLoading(true);
+          } else if (data.type === 'pong') {
+            // Keep-alive pong
           } else if (data.type === 'transcript') {
             setMessages((prev) => [...prev, { role: 'user', content: data.text }]);
+          } else if (data.type === 'reminder_alert') {
+            if (data.text) {
+              setMessages((prev) => [...prev, { role: 'assistant', content: `⏰ Reminder: ${data.text}` }]);
+            }
+            if (data.reminders) setReminders(data.reminders);
+            if (data.audio_url) playAudio(data.audio_url);
+            window.dispatchEvent(new CustomEvent('orbit:reminder_alert', { detail: data }));
           } else if (data.type === 'agent_response') {
             setIsLoading(false);
             if (data.history) {
@@ -84,6 +103,7 @@ export function useOrbitAgent() {
 
       ws.onclose = () => {
         setConnected(false);
+        if (pingTimer) clearInterval(pingTimer);
         reconnectTimer = setTimeout(connectWs, 3000);
       };
     };

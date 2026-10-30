@@ -42,7 +42,14 @@ const RemindersMemory = () => {
             }
         };
         load();
-        return () => { cancelled = true; };
+        const onAlert = () => { load(); };
+        window.addEventListener('orbit:reminder_alert', onAlert);
+        const pollInterval = setInterval(load, 15000);
+        return () => {
+            cancelled = true;
+            window.removeEventListener('orbit:reminder_alert', onAlert);
+            clearInterval(pollInterval);
+        };
     }, [revision]);
 
     const addReminder = async (event) => {
