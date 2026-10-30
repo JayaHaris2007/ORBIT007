@@ -41,25 +41,14 @@ class OmniVoiceEngine:
         self.is_loading: bool = False
         self.error: str | None = None
 
-        # Resolve voice reference or voice design if not explicitly provided
+        # Configure exclusively with voice design instruct ("describe one")
         if not self.voice_kwargs:
-            ref_path = config.TTS_REF_AUDIO
-            output_audio = (config.ROOT_DIR / "TTS" / "audio.wav").resolve()
-            # Ensure we only use ref_audio if it's an explicit external reference, not the dynamically generated output file
-            if ref_path and os.path.isfile(ref_path) and os.path.abspath(ref_path) != str(output_audio):
-                self.voice_kwargs = {
-                    "ref_audio": ref_path,
-                    "ref_text": config.TTS_REF_TEXT,
-                    "speed": config.TTS_SPEED,
-                }
-                log.info("OmniVoice configured with reference audio: %s and ref text", ref_path)
-            else:
-                self.voice_kwargs = {
-                    "instruct": config.TTS_INSTRUCT,
-                    "steps": config.TTS_STEPS,
-                    "speed": config.TTS_SPEED,
-                }
-                log.info("OmniVoice configured with voice design instruct: %s", config.TTS_INSTRUCT)
+            self.voice_kwargs = {
+                "instruct": config.TTS_INSTRUCT,
+                "steps": config.TTS_STEPS,
+                "speed": config.TTS_SPEED,
+            }
+            log.info("OmniVoice configured with voice design instruct: %s", config.TTS_INSTRUCT)
 
     def set_instruct(self, instruct: str, speed: float | None = None) -> None:
         """Update voice design tone dynamically."""

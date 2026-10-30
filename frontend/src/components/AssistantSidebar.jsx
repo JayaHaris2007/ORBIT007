@@ -354,6 +354,7 @@ const AssistantSidebar = () => {
                         <button
                             type="button"
                             onClick={() => {
+                                window.dispatchEvent(new CustomEvent('spidey:audio_stop'));
                                 setLiveOpen(true);
                                 voiceSession.startSession('live', chatId);
                             }}
@@ -366,7 +367,10 @@ const AssistantSidebar = () => {
                         </button>
                         <button
                             type="button"
-                            onClick={() => setOrbitMode(!orbitMode)}
+                            onClick={() => {
+                                window.dispatchEvent(new CustomEvent('spidey:audio_stop'));
+                                setOrbitMode(!orbitMode);
+                            }}
                             className={`flex items-center gap-1.5 rounded-lg border px-2 py-1 text-[11px] font-semibold transition-colors ${
                                 orbitMode
                                     ? 'border-orange-400 bg-orange-500 text-black shadow-[0_0_10px_rgba(255,106,26,0.5)]'

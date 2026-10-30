@@ -27,11 +27,21 @@ export function useVoice() {
         audioQueueRef.current = new AudioQueue();
     }
 
-    // Connect queue callbacks to speaking state
+    // Connect queue callbacks to speaking state and listen for global audio stop
     useEffect(() => {
         const queue = audioQueueRef.current;
         queue.onPlay = () => setIsSpeaking(true);
         queue.onIdle = () => setIsSpeaking(false);
+
+        const onExternalStop = () => {
+            if (abortControllerRef.current) {
+                abortControllerRef.current.abort();
+            }
+            queue.stop();
+            setIsSpeaking(false);
+        };
+        window.addEventListener('spidey:audio_stop', onExternalStop);
+        return () => window.removeEventListener('spidey:audio_stop', onExternalStop);
     }, []);
 
     // Load initial settings from server
@@ -87,6 +97,9 @@ export function useVoice() {
     const speak = useCallback(
         async (text) => {
             if (!speakEnabled || !text || !text.trim()) return;
+
+            // Silence other audio players before initiating speech
+            window.dispatchEvent(new CustomEvent('spidey:audio_stop'));
 
             // Stop any existing playback first
             if (abortControllerRef.current) {

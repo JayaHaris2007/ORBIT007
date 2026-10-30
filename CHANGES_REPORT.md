@@ -136,3 +136,22 @@ The manual verification plan specified in Section 7 was executed with full end-t
 2. **Database Consolidation:** Unify the SQLite schemas into a single migration-managed database using Alembic.
 3. **Token Streaming:** Stream LLM tokens via Server-Sent Events (SSE) or WebSocket packets for lower perceptual latency during chat generation.
 4. **Desktop Notifications:** Integrate HTML5 Web Notifications API in the frontend so browser push alerts appear even when the tab is running in the background.
+
+---
+
+## 9. Voice Audio Fixes & Single-Playback Coordination
+
+### Problem Reported
+The assistant was speaking twice simultaneously (duplicate playback) and with a garbled/foreign voice ("different language") due to voice cloning fallback from `TTS/audio.wav`.
+
+### Fixes Applied
+1. **Purged `audio.wav` Voice Cloning:**
+   - Removed `TTS_REF_AUDIO` and `TTS_REF_TEXT` from `voice/config.py` and `voice/tts.py`.
+   - Deleted `TTS/audio.wav` from disk.
+   - Configured `OmniVoiceEngine` exclusively with Voice Design prompt instruction (`TTS_INSTRUCT: "male, low pitch, young adult, american accent"`).
+2. **Prevented Duplicate Speech Playback:**
+   - Fixed unmount reconnection leak in `useOrbitAgent.js` which previously left multiple WebSockets connected simultaneously in the background.
+   - Ensured `useOrbitAgent.js` respects the global `spidey_speak_enabled` toggle before playing audio.
+   - Introduced `spidey:audio_stop` event bus so `<audio>` tags and `AudioQueue` cleanly stop before any new utterance begins.
+   - Buffered streaming 100ms frames in `app.py`'s `/ws` endpoint with `end_audio` delimiter to prevent multiple rapid speech generations from the same sentence.
+

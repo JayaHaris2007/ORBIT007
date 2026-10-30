@@ -76,7 +76,6 @@ from db import (
 BASE_DIR = Path(__file__).resolve().parent
 TTS_DIR = BASE_DIR / "TTS"
 TTS_DIR.mkdir(parents=True, exist_ok=True)
-AUDIO_OUTPUT_PATH = TTS_DIR / "audio.wav"
 from memory import LOCAL_TIMEZONE, MAX_RETRIEVED_MEMORIES, MemoryStore
 from learning import roadmaps as learning_roadmaps, schema as learning_schema
 from learning import classifier as learning_classifier
@@ -4704,6 +4703,7 @@ async def websocket_agent_endpoint(websocket: WebSocket):
             "reminders": _live_reminders(),
             "history": get_recent_messages(limit=20),
         })
+        audio_buffer = bytearray()
         while True:
             packet = await websocket.receive()
             if "bytes" in packet and packet["bytes"]:
@@ -4711,15 +4711,32 @@ async def websocket_agent_endpoint(websocket: WebSocket):
                 if len(pcm_bytes) > 2 * 1024 * 1024:
                     await websocket.send_json({"type": "error", "error": "Binary payload exceeds 2 MB limit"})
                     continue
-                transcript = await asyncio.to_thread(transcribe_pcm_bytes, pcm_bytes)
-                if transcript and transcript.strip():
-                    await websocket.send_json({
-                        "type": "transcript",
-                        "text": transcript,
-                    })
-                    await websocket.send_json({"type": "status", "state": "thinking"})
-                    result = await process_agent_turn(transcript)
-                    await websocket.send_json(result)
+                if len(pcm_bytes) >= 16000:
+                    # Full utterance payload
+                    transcript = await asyncio.to_thread(transcribe_pcm_bytes, pcm_bytes)
+                    if transcript and transcript.strip():
+                        await websocket.send_json({
+                            "type": "transcript",
+                            "text": transcript,
+                        })
+                        await websocket.send_json({"type": "status", "state": "thinking"})
+                        result = await process_agent_turn(transcript)
+                        await websocket.send_json(result)
+                else:
+                    # Streamed 100ms chunk from AudioWorklet
+                    audio_buffer.extend(pcm_bytes)
+                    if len(audio_buffer) >= 64000:
+                        data_to_transcribe = bytes(audio_buffer)
+                        audio_buffer.clear()
+                        transcript = await asyncio.to_thread(transcribe_pcm_bytes, data_to_transcribe)
+                        if transcript and transcript.strip():
+                            await websocket.send_json({
+                                "type": "transcript",
+                                "text": transcript,
+                            })
+                            await websocket.send_json({"type": "status", "state": "thinking"})
+                            result = await process_agent_turn(transcript)
+                            await websocket.send_json(result)
 
             elif "text" in packet and packet["text"]:
                 try:
@@ -4730,6 +4747,22 @@ async def websocket_agent_endpoint(websocket: WebSocket):
                 msg_type = payload.get("type")
                 if msg_type == "ping":
                     await websocket.send_json({"type": "pong"})
+                    continue
+                elif msg_type == "end_audio":
+                    if len(audio_buffer) >= 3200:
+                        data_to_transcribe = bytes(audio_buffer)
+                        audio_buffer.clear()
+                        transcript = await asyncio.to_thread(transcribe_pcm_bytes, data_to_transcribe)
+                        if transcript and transcript.strip():
+                            await websocket.send_json({
+                                "type": "transcript",
+                                "text": transcript,
+                            })
+                            await websocket.send_json({"type": "status", "state": "thinking"})
+                            result = await process_agent_turn(transcript)
+                            await websocket.send_json(result)
+                    else:
+                        audio_buffer.clear()
                     continue
 
                 user_msg = payload.get("message") or payload.get("text") or ""

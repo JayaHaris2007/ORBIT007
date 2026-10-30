@@ -144,6 +144,14 @@ def test_tts_cpu_fallback_on_first_load_failure():
     assert calls[1][0] == "cpu"
 
 
+def test_tts_uses_voice_design_instruct_only():
+    engine = tts.OmniVoiceEngine(model_id="fake/model", device="cpu", dtype="float32")
+    assert "instruct" in engine.voice_kwargs
+    assert "ref_audio" not in engine.voice_kwargs
+    assert "ref_text" not in engine.voice_kwargs
+    assert engine.voice_kwargs["instruct"] == config.TTS_INSTRUCT
+
+
 # --- 5. Voice Router & Settings Round-Trip Tests ---
 
 def test_voice_settings_round_trip(temp_db):
