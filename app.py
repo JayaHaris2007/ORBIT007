@@ -1,3 +1,4 @@
+import logging
 import secrets
 import os
 import sys
@@ -10,7 +11,7 @@ import time
 import uuid
 import warnings
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -4055,7 +4056,10 @@ async def handle_http_error(request: Request, error: HTTPException):
     detail = error.detail
     return JSONResponse(
         status_code=error.status_code,
-        content={"error": detail if isinstance(detail, str) else str(detail)},
+        content={
+            "detail": detail if isinstance(detail, str) else str(detail),
+            "error": detail if isinstance(detail, str) else str(detail),
+        },
     )
 
 

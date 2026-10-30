@@ -549,6 +549,8 @@ def test_server_reminder_calls_user_when_not_on_call():
                                                 sleep_count += 1
                                                 if sleep_count > 1:
                                                     raise asyncio.CancelledError()
+                                            elif s >= 120:
+                                                await asyncio.Future()
                                             return None
 
                                         with patch("asyncio.sleep", side_effect=_mock_sleep):
