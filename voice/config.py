@@ -76,7 +76,16 @@ TTS_MODEL_ID = os.environ.get("TTS_MODEL_ID", "k2-fsa/OmniVoice").strip() or "k2
 
 # Voice design configuration (descriptive prompt style)
 TTS_INSTRUCT = os.environ.get(
-    "TTS_INSTRUCT", "male, low pitch, young adult, american accent"
+    "TTS_INSTRUCT",
+    (
+        "A deep, masculine voice with a rich, resonant, slightly gravelly texture. "
+        "Calm, composed, confident, and highly intelligent. Medium-low to low pitch "
+        "with exceptionally clear pronunciation, natural breathing, and smooth conversational flow. "
+        "Speaks with quiet authority and subtle charisma, never sounding aggressive, monotonous, "
+        "or overly robotic. A cinematic futuristic AI personality with a sophisticated, loyal, "
+        "and reassuring presence. Uses controlled pacing, precise articulation, and subtle "
+        "emotional expression. Neutral international English accent with a mature, professional delivery."
+    ),
 ).strip()
 TTS_STEPS = _int("TTS_STEPS", 16)
 TTS_SPEED = _float("TTS_SPEED", 1.0, minimum=0.2)
