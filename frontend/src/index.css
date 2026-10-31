@@ -142,22 +142,43 @@ input:-webkit-autofill:active {
   caret-color: white;
 }
 
-/* Scrollbar */
+/* Scrollbar - S.P.I.D.E.Y Orange Theme */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #ff6a1a rgba(14, 12, 10, 0.85);
+}
+
 ::-webkit-scrollbar {
-  width: 8px;
+  width: 7px;
+  height: 7px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #0a0a0a;
+  background: rgba(14, 12, 10, 0.85);
+  border-left: 1px solid rgba(255, 106, 26, 0.08);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #333;
-  border-radius: 4px;
+  background: linear-gradient(180deg, #ff8c28 0%, #ff6a1a 50%, #d9480f 100%);
+  border-radius: 9999px;
+  box-shadow: 0 0 10px rgba(255, 106, 26, 0.45);
+  border: 1px solid rgba(255, 138, 76, 0.35);
+  transition: background 0.2s ease, box-shadow 0.2s ease;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #555;
+  background: linear-gradient(180deg, #ffa24b 0%, #ff7b2b 50%, #ea580c 100%);
+  box-shadow: 0 0 16px rgba(255, 106, 26, 0.85);
+  border-color: rgba(255, 170, 110, 0.6);
+}
+
+::-webkit-scrollbar-thumb:active {
+  background: #ff8c28;
+  box-shadow: 0 0 20px rgba(255, 106, 26, 1);
+}
+
+::-webkit-scrollbar-corner {
+  background: rgba(14, 12, 10, 0.9);
 }
 
 /* S.P.I.D.E.Y orange, ink and ivory interface */
