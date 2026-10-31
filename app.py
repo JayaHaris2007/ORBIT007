@@ -303,6 +303,7 @@ def _push_reminder_alert(reminder: dict[str, Any], content: str) -> None:
                 "text": content,
                 "audio_url": audio_url,
                 "reminders": _live_reminders(),
+                "chat_id": reminder.get("chat_id"),
             })
         except Exception as exc:
             logging.getLogger("orbit007").warning("Failed in _push_reminder_alert: %s", exc)
@@ -4426,6 +4427,8 @@ class ReminderCreatePayload(BaseModel):
 
 class ReminderUpdatePayload(BaseModel):
     completed: bool = True
+    remind_at: Optional[str] = None
+    run_at: Optional[str] = None
 
 # legacy, unused
 def parse_and_execute_reminder_intent(user_text: str) -> Optional[str]:
@@ -4650,7 +4653,14 @@ async def process_agent_turn(
 
 @app.get("/api/reminders")
 async def api_get_reminders(include_completed: bool = False):
-    return {"reminders": _live_reminders()}
+    if not include_completed:
+        return {"reminders": _live_reminders()}
+    all_rows = memory_store.list_reminders(active_only=False)
+    sorted_rows = sorted(
+        all_rows,
+        key=lambda r: (0 if r.get("active", 1) else 1, r.get("run_at", "")),
+    )
+    return {"reminders": [_reminder_view(r) for r in sorted_rows]}
 
 @app.post("/api/reminders")
 async def api_create_reminder(payload: ReminderCreatePayload):
@@ -4670,10 +4680,62 @@ async def api_create_reminder(payload: ReminderCreatePayload):
 
 @app.patch("/api/reminders/{reminder_id}")
 async def api_update_reminder(reminder_id: str, payload: ReminderUpdatePayload):
-    ok = _cancel_reminder_unified(reminder_id)
-    if not ok:
+    existing = memory_store.get_reminder(reminder_id)
+    if not existing:
         raise HTTPException(status_code=404, detail="Reminder not found")
-    return {"status": "success", "reminders": _live_reminders()}
+
+    if payload.completed:
+        ok = _cancel_reminder_unified(reminder_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Reminder not found")
+        updated_row = memory_store.get_reminder(reminder_id)
+        return {
+            "status": "success",
+            "reminder": _reminder_view(updated_row) if updated_row else None,
+            "reminders": _live_reminders(),
+        }
+
+    # completed == False -> reactivate path
+    new_when = (payload.remind_at or payload.run_at or "").strip()
+    target_iso: str | None = None
+    if new_when:
+        parsed = _parse_reminder_time(new_when)
+        if parsed is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"I could not understand the reminder time: {new_when!r}.",
+            )
+        target_iso = parsed.isoformat()
+    else:
+        # Check if stored time is in the past (and the reminder is not recurring)
+        is_recurring = bool(existing.get("recurrence"))
+        if not is_recurring:
+            stored_run_at = existing.get("run_at", "")
+            try:
+                stored_dt = datetime.fromisoformat(stored_run_at)
+                if stored_dt.tzinfo is None:
+                    stored_dt = stored_dt.replace(tzinfo=LOCAL_TIMEZONE)
+                now_dt = datetime.now(LOCAL_TIMEZONE)
+                if stored_dt <= now_dt:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="That time has passed — send a new remind_at",
+                    )
+            except HTTPException:
+                raise
+            except Exception as err:
+                logging.getLogger("orbit007").warning("Error checking stored_run_at: %s", err)
+
+    updated_row = memory_store.set_reminder_active(reminder_id, True, target_iso)
+    if not updated_row:
+        raise HTTPException(status_code=404, detail="Reminder not found")
+
+    _schedule_reminder(updated_row)
+    return {
+        "status": "success",
+        "reminder": _reminder_view(updated_row),
+        "reminders": _live_reminders(),
+    }
 
 @app.delete("/api/reminders/{reminder_id}")
 async def api_delete_reminder(reminder_id: str):
@@ -4697,11 +4759,14 @@ async def websocket_agent_endpoint(websocket: WebSocket):
     if not await ws_authorized(websocket):
         return
     await ws_manager.connect(websocket)
+    _ensure_chat_exists(DEFAULT_CHAT_ID)
+    current_chat_id = DEFAULT_CHAT_ID
     try:
         await websocket.send_json({
             "type": "connected",
             "reminders": _live_reminders(),
-            "history": get_recent_messages(limit=20),
+            "history": get_recent_messages(session_id=current_chat_id, limit=20),
+            "chat_id": current_chat_id,
         })
         audio_buffer = bytearray()
         while True:
@@ -4720,7 +4785,9 @@ async def websocket_agent_endpoint(websocket: WebSocket):
                             "text": transcript,
                         })
                         await websocket.send_json({"type": "status", "state": "thinking"})
-                        result = await process_agent_turn(transcript)
+                        result = await process_agent_turn(
+                            transcript, session_id=current_chat_id, chat_id=current_chat_id
+                        )
                         await websocket.send_json(result)
                 else:
                     # Streamed 100ms chunk from AudioWorklet
@@ -4735,7 +4802,9 @@ async def websocket_agent_endpoint(websocket: WebSocket):
                                 "text": transcript,
                             })
                             await websocket.send_json({"type": "status", "state": "thinking"})
-                            result = await process_agent_turn(transcript)
+                            result = await process_agent_turn(
+                                transcript, session_id=current_chat_id, chat_id=current_chat_id
+                            )
                             await websocket.send_json(result)
 
             elif "text" in packet and packet["text"]:
@@ -4748,6 +4817,18 @@ async def websocket_agent_endpoint(websocket: WebSocket):
                 if msg_type == "ping":
                     await websocket.send_json({"type": "pong"})
                     continue
+                elif msg_type == "set_chat":
+                    req_cid = payload.get("chat_id")
+                    if req_cid and memory_store.chat_exists(req_cid):
+                        current_chat_id = req_cid
+                    else:
+                        current_chat_id = DEFAULT_CHAT_ID
+                    await websocket.send_json({
+                        "type": "chat_set",
+                        "chat_id": current_chat_id,
+                        "history": get_recent_messages(session_id=current_chat_id, limit=20),
+                    })
+                    continue
                 elif msg_type == "end_audio":
                     if len(audio_buffer) >= 3200:
                         data_to_transcribe = bytes(audio_buffer)
@@ -4759,19 +4840,28 @@ async def websocket_agent_endpoint(websocket: WebSocket):
                                 "text": transcript,
                             })
                             await websocket.send_json({"type": "status", "state": "thinking"})
-                            result = await process_agent_turn(transcript)
+                            result = await process_agent_turn(
+                                transcript, session_id=current_chat_id, chat_id=current_chat_id
+                            )
                             await websocket.send_json(result)
                     else:
                         audio_buffer.clear()
                     continue
 
                 user_msg = payload.get("message") or payload.get("text") or ""
-                session_id = payload.get("session_id", "default")
-                chat_id = payload.get("chat_id")
+                # Accept optional chat_id on every text message
+                msg_chat_id = payload.get("chat_id")
+                if msg_chat_id is not None:
+                    if msg_chat_id and memory_store.chat_exists(msg_chat_id):
+                        current_chat_id = msg_chat_id
+                    else:
+                        current_chat_id = DEFAULT_CHAT_ID
 
                 if user_msg.strip():
                     await websocket.send_json({"type": "status", "state": "thinking"})
-                    result = await process_agent_turn(user_msg, session_id=session_id, chat_id=chat_id)
+                    result = await process_agent_turn(
+                        user_msg, session_id=current_chat_id, chat_id=current_chat_id
+                    )
                     await websocket.send_json(result)
     except WebSocketDisconnect:
         logging.getLogger("orbit007").info("WebSocket client disconnected")

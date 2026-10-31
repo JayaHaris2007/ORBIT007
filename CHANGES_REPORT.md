@@ -155,3 +155,57 @@ The assistant was speaking twice simultaneously (duplicate playback) and with a 
    - Introduced `spidey:audio_stop` event bus so `<audio>` tags and `AudioQueue` cleanly stop before any new utterance begins.
    - Buffered streaming 100ms frames in `app.py`'s `/ws` endpoint with `end_audio` delimiter to prevent multiple rapid speech generations from the same sentence.
 
+
+
+---
+
+## 10. Active Chat Scoping for Agent Mode & Full PATCH Semantics (Milestone v2.1)
+
+**Generated:** 2026-10-31  
+**Test Suite Status:** 236 passed, 0 failed, 16 warnings (63.13s)
+
+### Problem Addressed
+1. **Agent Mode Disconnected from Active Chat:** Previously, `useOrbitAgent.js` never transmitted a chat ID, so every turn and reminder fell into `"default"`. The sidebar polls notifications by its active chat ID, causing missed reminder alerts across conversations.
+2. **Lossy PATCH Reminders Semantics:** `PATCH /api/reminders/{id}` unconditionally cancelled reminders regardless of payload, ignoring `completed: false` (undo/reactivate), and `GET /api/reminders?include_completed=true` was not implemented.
+
+### Fixes Implemented
+
+#### Fix 1: Active Chat Scoping for Agent Mode
+- **Backend (`app.py`):**
+  - Added per-connection `current_chat_id` tracking in `/ws` (defaults to `DEFAULT_CHAT_ID = "default"`).
+  - Accepted `{"type": "set_chat", "chat_id": "..."}` and validated against `memory_store.chat_exists`; unknown IDs safely fall back to `"default"` without creating phantom conversations.
+  - Accepted optional `chat_id` on text messages, validating with fallback.
+  - Used `current_chat_id` for binary audio frames and `end_audio` transcripts.
+  - Passed `chat_id=current_chat_id` and `session_id=current_chat_id` to `process_agent_turn` so LLM history and commands are scoped per chat.
+  - Added `"chat_id": reminder.get("chat_id")` to `reminder_alert` payload in `_push_reminder_alert`.
+- **Frontend (`useOrbitAgent.js`, `AssistantSidebar.jsx`, `OrbitAgentView.jsx`):**
+  - Accepted `activeChatIdProp` in `useOrbitAgent(activeChatIdProp)` with fallback to `spidey_active_chat_id` and `jarvis_active_chat_id`.
+  - Sent `set_chat` immediately after WebSocket opens and whenever the active chat changes.
+  - Re-fetched `/api/history?session_id=...` upon switching chats.
+  - Filtered in-chat `⏰ Reminder: ...` display on `reminder_alert` so it only appends when `data.chat_id === activeChatId` (while still playing audio and updating reminder badges).
+  - Wired `activeChatId={chatId}` from `AssistantSidebar` into `OrbitAgentView`.
+  - Handled chat deletion and data reset events cleanly to fall back to `"default"`.
+
+#### Fix 2: Full PATCH /api/reminders/{id} Semantics
+- **Backend (`memory.py`, `app.py`):**
+  - Added `set_reminder_active(reminder_id, active, run_at=None) -> dict | None` in `MemoryStore`.
+  - Updated `ReminderUpdatePayload` to support `completed: bool = True`, `remind_at: str | None`, `run_at: str | None`.
+  - Supported `PATCH completed: true` to deactivate reminder and remove scheduler job.
+  - Supported `PATCH completed: false` to reactivate reminder:
+    - If `remind_at`/`run_at` is provided, parses with `_parse_reminder_time` and updates `run_at`.
+    - If no new time is provided and the stored time has passed (and reminder is not recurring), returns HTTP 400: `"That time has passed — send a new remind_at"`.
+    - If recurring or future, reactivates and re-schedules without requiring a new time.
+    - Returns HTTP 404 for unknown reminder IDs.
+  - Implemented `GET /api/reminders?include_completed=true`: returns all reminders sorted with active items first.
+- **Frontend (`RemindersMemory.jsx`, `useOrbitAgent.js`):**
+  - Added "Show completed" checkbox toggle in `RemindersMemory.jsx` calling `/api/reminders?include_completed=true`.
+  - Added "Undo" button for completed items sending `PATCH { completed: false }` and displaying backend 400 error messages if the time has passed.
+  - Exported `completeReminder(id, completed, remind_at)` in `useOrbitAgent.js` (and aliased `toggleReminder`).
+
+### Test Results
+- Created `tests/test_orbit_reminder_chat.py`:
+  - `test_ws_set_chat_and_fallback`: Verified `set_chat` switches active chat, unknown chat safely falls back to `"default"` without creating conversations, and reminders are assigned to the target chat.
+  - `test_reminder_alert_includes_chat_id`: Verified broadcast alert contains `chat_id`.
+  - `test_patch_reminder_complete_and_undo`: Verified 404 on unknown ID, 200 on complete, 200 on future undo, 400 on past one-shot undo without new time, 400 on unparseable time, 200 on past undo with valid new time, and 200 on recurring reminder undo.
+  - `test_get_reminders_include_completed`: Verified default active-only filter, `include_completed=true` return shape, and active-first ordering.
+- Full pytest suite: **236 passed, 16 warnings in 63.13s** (100% passing).

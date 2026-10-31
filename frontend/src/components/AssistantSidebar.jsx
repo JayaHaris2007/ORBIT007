@@ -217,6 +217,7 @@ const AssistantSidebar = () => {
     const selectChat = (id) => {
         setHistoryOpen(false);
         setConfirmingId('');
+            window.dispatchEvent(new CustomEvent('orbit:chat_deleted', { detail: { deletedId: id } }));
         if (id !== chatId) openChat(id);
     };
 
@@ -439,7 +440,7 @@ const AssistantSidebar = () => {
 
                 {orbitMode ? (
                     <div className="flex-1 min-h-0 flex flex-col">
-                        <OrbitAgentView />
+                        <OrbitAgentView activeChatId={chatId} />
                     </div>
                 ) : (
                     <>

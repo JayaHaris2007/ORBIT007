@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { format } from 'date-fns';
-import { Bell, Brain, Plus, Trash2 } from 'lucide-react';
+import { Bell, Brain, Plus, RotateCcw, Trash2 } from 'lucide-react';
 import { apiRequest } from '../services/api';
 import { useAppData } from '../context/AppDataContext';
 
@@ -18,15 +18,17 @@ const RemindersMemory = () => {
     const [memoryText, setMemoryText] = useState('');
     const [chatId, setChatId] = useState('');
     const [loading, setLoading] = useState(true);
+    const [showCompleted, setShowCompleted] = useState(false);
     const [error, setError] = useState('');
 
     useEffect(() => {
         let cancelled = false;
         const load = async () => {
             try {
+                const reminderUrl = showCompleted ? '/api/reminders?include_completed=true' : '/api/reminders';
                 const [chatData, reminderData, memoryData] = await Promise.all([
                     apiRequest('/api/chats'),
-                    apiRequest('/api/reminders'),
+                    apiRequest(reminderUrl),
                     apiRequest('/api/memories')
                 ]);
                 if (cancelled) return;
@@ -50,7 +52,7 @@ const RemindersMemory = () => {
             window.removeEventListener('orbit:reminder_alert', onAlert);
             clearInterval(pollInterval);
         };
-    }, [revision]);
+    }, [revision, showCompleted]);
 
     const addReminder = async (event) => {
         event.preventDefault();
@@ -68,6 +70,21 @@ const RemindersMemory = () => {
             setReminderText('');
             setReminderAt('');
             setError('');
+        } catch (requestError) {
+            setError(requestError.message);
+        }
+    };
+
+    const undoReminder = async (id) => {
+        try {
+            setError('');
+            await apiRequest(`/api/reminders/${id}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ completed: false })
+            });
+            const reminderUrl = showCompleted ? '/api/reminders?include_completed=true' : '/api/reminders';
+            const reminderData = await apiRequest(reminderUrl);
+            setReminders([...(reminderData.reminders || [])].sort(byRunAt));
         } catch (requestError) {
             setError(requestError.message);
         }
@@ -124,7 +141,18 @@ const RemindersMemory = () => {
                     <h2 className="flex items-center gap-2 text-lg font-bold text-white">
                         <Bell size={18} className="text-orange-400" /> Reminders
                     </h2>
-                    <span className="font-mono text-[10px] uppercase tracking-wider text-textMuted">{reminders.length} scheduled</span>
+                    <div className="flex items-center gap-3">
+                        <label className="flex items-center gap-1.5 cursor-pointer text-xs font-mono text-textMuted hover:text-white transition-colors">
+                            <input
+                                type="checkbox"
+                                checked={showCompleted}
+                                onChange={(e) => setShowCompleted(e.target.checked)}
+                                className="rounded border-white/20 bg-surfaceHighlight text-orange-500 focus:ring-0 cursor-pointer"
+                            />
+                            <span>Show completed</span>
+                        </label>
+                        <span className="font-mono text-[10px] uppercase tracking-wider text-textMuted">{reminders.filter(r => !r.completed).length} scheduled</span>
+                    </div>
                 </div>
 
                 <form onSubmit={addReminder} className="mt-5 flex flex-col gap-3 md:flex-row">
@@ -137,14 +165,33 @@ const RemindersMemory = () => {
 
                 <div className="mt-4 divide-y divide-white/5">
                     {reminders.map((reminder) => (
-                        <div key={reminder.id} className="flex items-center gap-3 py-3">
+                        <div key={reminder.id} className={`flex items-center gap-3 py-3 ${reminder.completed ? 'opacity-65' : ''}`}>
                             <div className="min-w-0 flex-1">
-                                <p className="truncate text-sm text-white">{reminder.text}</p>
+                                <div className="flex items-center gap-2">
+                                    <p className={`truncate text-sm ${reminder.completed ? 'line-through text-neutral-400' : 'text-white'}`}>
+                                        {reminder.text}
+                                    </p>
+                                    {reminder.completed ? (
+                                        <span className="text-[10px] font-mono uppercase px-1.5 py-0.5 rounded bg-white/10 text-neutral-400">
+                                            Completed
+                                        </span>
+                                    ) : null}
+                                </div>
                                 <p className="mt-0.5 text-xs font-mono text-textMuted">
                                     {format(new Date(reminder.run_at), 'MMM d, h:mm a')}
                                     {reminder.recurrence ? ` · ${reminder.recurrence}` : ''}
                                 </p>
                             </div>
+                            {Boolean(reminder.completed) && (
+                                <button
+                                    type="button"
+                                    onClick={() => undoReminder(reminder.id)}
+                                    className="flex items-center gap-1 rounded px-2.5 py-1 text-xs font-mono text-orange-400 bg-orange-500/10 hover:bg-orange-500/20 transition-colors"
+                                    title="Reactivate reminder"
+                                >
+                                    <RotateCcw size={12} /> Undo
+                                </button>
+                            )}
                             <button type="button" onClick={() => cancelReminder(reminder.id)} className="text-textMuted transition-colors hover:text-red-300 p-2" aria-label={`Cancel reminder ${reminder.text}`}>
                                 <Trash2 size={15} />
                             </button>

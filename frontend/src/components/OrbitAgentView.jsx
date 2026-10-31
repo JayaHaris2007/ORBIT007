@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { useOrbitAgent } from '../useOrbitAgent';
 import { Mic, MicOff, Send, Volume2, CheckCircle2, Circle, Trash2, Plus, Wifi, WifiOff, Loader2 } from 'lucide-react';
 
-export default function OrbitAgentView() {
+export default function OrbitAgentView({ activeChatId }) {
   const {
     messages,
     reminders,
@@ -13,9 +13,10 @@ export default function OrbitAgentView() {
     startVoiceCapture,
     stopVoiceCapture,
     addReminder,
+    completeReminder,
     toggleReminder,
     deleteReminder,
-  } = useOrbitAgent();
+  } = useOrbitAgent(activeChatId);
 
   const [inputText, setInputText] = useState('');
   const [newTitle, setNewTitle] = useState('');

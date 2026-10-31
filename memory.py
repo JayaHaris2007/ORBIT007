@@ -721,6 +721,25 @@ class MemoryStore:
             ).fetchone()
         return row is not None
 
+    def set_reminder_active(
+        self, reminder_id: str, active: bool, run_at: str | None = None
+    ) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            if run_at is not None:
+                connection.execute(
+                    "UPDATE reminders SET active = ?, run_at = ? WHERE id = ?",
+                    (1 if active else 0, run_at, reminder_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE reminders SET active = ? WHERE id = ?",
+                    (1 if active else 0, reminder_id),
+                )
+            row = connection.execute(
+                "SELECT * FROM reminders WHERE id = ?", (reminder_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
     def cancel_reminder(self, reminder_id: str) -> bool:
         with self.connect() as connection:
             result = connection.execute(
