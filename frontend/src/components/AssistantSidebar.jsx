@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import { format } from 'date-fns';
-import { Bot, Check, History, MessageSquarePlus, PanelRightClose, Radio, Send, Trash2, X } from 'lucide-react';
+import { Bot, Check, ChevronUp, History, MessageSquarePlus, PanelRightClose, Radio, Send, Trash2, X } from 'lucide-react';
 import { apiRequest } from '../services/api';
 import { useAppData } from '../context/AppDataContext';
 import { cleanAssistantText } from '../utils/textUtils';
@@ -311,18 +311,26 @@ const AssistantSidebar = () => {
             <button
                 type="button"
                 onClick={() => {
-                    // Below xl the panel is an overlay, so the pill only opens/closes it.
+                    // Below xl the panel is an overlay, so the tab only opens/closes it.
                     if (minimized && window.matchMedia('(min-width: 1280px)').matches) {
                         setMinimized(false);
                         return;
                     }
                     setOpen((current) => !current);
                 }}
-                className="workspace-toggle fixed bottom-20 right-4 z-40 flex items-center gap-2 rounded-full border border-orange-400/30 bg-[#14100e] px-4 py-3 text-sm font-semibold text-white shadow-xl xl:hidden"
+                className={`workspace-toggle group fixed bottom-16 md:bottom-0 left-1/2 -translate-x-1/2 md:left-[calc(50%+8rem)] z-40 items-center gap-2.5 rounded-t-2xl rounded-b-none border-t border-l border-r border-orange-500/40 border-b-0 bg-gradient-to-t from-[#0a0a0c] via-[#14100e] to-[#1c1410] px-5 py-2 md:px-7 md:py-2.5 shadow-[0_-4px_24px_rgba(255,106,26,0.28),inset_0_1px_0_rgba(255,140,40,0.35)] transition-all duration-300 hover:border-orange-400 hover:shadow-[0_-6px_32px_rgba(255,106,26,0.5)] hover:from-[#120e0a] hover:to-[#241a12] active:translate-y-0.5 xl:hidden cursor-pointer ${open ? 'hidden' : 'flex'}`}
                 aria-expanded={open}
                 aria-label={minimized ? 'Restore S.P.I.D.E.Y panel' : open ? 'Close S.P.I.D.E.Y panel' : 'Open S.P.I.D.E.Y panel'}
             >
-                <Bot size={18} className="text-orange-400" /> S.P.I.D.E.Y
+                <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-orange-400 opacity-75"></span>
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-orange-500"></span>
+                </span>
+                <Bot size={16} className="text-orange-400 transition-transform duration-300 group-hover:scale-110" />
+                <span className="font-mono text-xs md:text-sm font-bold tracking-[0.24em] text-orange-100 transition-colors group-hover:text-white">
+                    S.P.I.D.E.Y
+                </span>
+                <ChevronUp size={14} className="text-orange-400/60 transition-all duration-300 group-hover:-translate-y-0.5 group-hover:text-orange-300" />
             </button>
             {open && <button type="button" className="workspace-backdrop fixed inset-0 z-40 bg-black/60 xl:hidden" aria-label="Close S.P.I.D.E.Y panel" onClick={() => setOpen(false)} />}
 
