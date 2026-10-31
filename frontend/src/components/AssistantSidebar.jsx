@@ -318,16 +318,27 @@ const AssistantSidebar = () => {
                     }
                     setOpen((current) => !current);
                 }}
-                className={`workspace-toggle group fixed right-0 top-1/2 -translate-y-1/2 z-40 items-center gap-2 rounded-l-2xl rounded-r-none border-t border-l border-b border-orange-500/40 border-r-0 bg-gradient-to-l from-[#0a0a0c] via-[#14100e] to-[#1c1410] px-3.5 py-2.5 md:px-4 md:py-3 shadow-[-4px_0_24px_rgba(255,106,26,0.28),inset_1px_0_0_rgba(255,140,40,0.35)] transition-all duration-300 hover:border-orange-400 hover:shadow-[-6px_0_32px_rgba(255,106,26,0.5)] hover:from-[#120e0a] hover:to-[#241a12] hover:-translate-x-1 active:translate-x-0 xl:hidden cursor-pointer ${open ? 'hidden' : 'flex'}`}
+                className={`workspace-toggle group fixed right-0 top-1/2 -translate-y-1/2 z-40 flex-col items-center gap-1.5 rounded-l-2xl rounded-r-none border-t border-l border-b border-orange-500/40 border-r-0 bg-gradient-to-l from-[#080706] via-[#120e0b] to-[#1c140e] py-3.5 px-2 md:px-2.5 shadow-[-4px_0_24px_rgba(255,106,26,0.25),inset_1px_0_0_rgba(255,140,40,0.3)] transition-all duration-300 hover:border-orange-400 hover:shadow-[-6px_0_32px_rgba(255,106,26,0.45)] hover:from-[#0e0a07] hover:to-[#241a12] hover:-translate-x-1 active:translate-x-0 xl:hidden cursor-pointer ${open ? 'hidden' : 'flex'}`}
                 aria-expanded={open}
                 aria-label={minimized ? 'Restore S.P.I.D.E.Y panel' : open ? 'Close S.P.I.D.E.Y panel' : 'Open S.P.I.D.E.Y panel'}
+                title={minimized ? 'Restore S.P.I.D.E.Y' : 'Open S.P.I.D.E.Y'}
             >
-                <ChevronLeft size={14} className="text-orange-400/70 transition-all duration-300 group-hover:-translate-x-0.5 group-hover:text-orange-300" />
-                <Bot size={16} className="text-orange-400 transition-transform duration-300 group-hover:scale-110" />
-                <span className="font-mono text-xs md:text-sm font-bold tracking-[0.22em] text-orange-100 transition-colors group-hover:text-white">
-                    S.P.I.D.E.Y
-                </span>
-                <span className="relative flex h-2 w-2">
+                <ChevronLeft size={13} className="text-orange-400/80 transition-all duration-300 group-hover:-translate-x-0.5 group-hover:text-orange-300" />
+                <Bot size={15} className="text-orange-400 transition-transform duration-300 group-hover:scale-110 mb-0.5" />
+                <div className="flex flex-col items-center font-mono text-[10px] md:text-[11px] font-bold leading-none text-orange-100 transition-colors group-hover:text-white select-none">
+                    <span>S</span>
+                    <span className="text-[7px] text-orange-400/60 my-[1px]">•</span>
+                    <span>P</span>
+                    <span className="text-[7px] text-orange-400/60 my-[1px]">•</span>
+                    <span>I</span>
+                    <span className="text-[7px] text-orange-400/60 my-[1px]">•</span>
+                    <span>D</span>
+                    <span className="text-[7px] text-orange-400/60 my-[1px]">•</span>
+                    <span>E</span>
+                    <span className="text-[7px] text-orange-400/60 my-[1px]">•</span>
+                    <span>Y</span>
+                </div>
+                <span className="relative flex h-2 w-2 mt-1">
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-orange-400 opacity-75"></span>
                     <span className="relative inline-flex rounded-full h-2 w-2 bg-orange-500"></span>
                 </span>
