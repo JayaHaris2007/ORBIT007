@@ -8,6 +8,8 @@ import difflib
 import re
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 import warnings
 from contextlib import asynccontextmanager
@@ -50,6 +52,36 @@ CPU_MEMORY_LIMIT = "6GiB"
 MAX_PROMPT_CHARS = 2000
 MAX_NEW_TOKENS = 512
 DATABASE_PATH = Path(os.environ.get("ORBIT_DB_DIR", Path(__file__).resolve().parent)) / "assistant.db"
+
+# LLM Backend configuration
+LLM_BACKEND = os.environ.get("LLM_BACKEND", "transformers").strip().lower()
+if LLM_BACKEND not in ("transformers", "ollama"):
+    logging.getLogger("orbit007").warning(
+        "Unknown LLM_BACKEND %r; falling back to 'transformers'", LLM_BACKEND
+    )
+    LLM_BACKEND = "transformers"
+
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:4b").strip()
+try:
+    OLLAMA_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "4096").strip())
+except Exception:
+    OLLAMA_NUM_CTX = 4096
+
+OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "5m").strip()
+try:
+    OLLAMA_TIMEOUT = float(os.environ.get("OLLAMA_TIMEOUT", "120").strip())
+except Exception:
+    OLLAMA_TIMEOUT = 120.0
+
+_ollama_ready: bool = False
+
+if LLM_BACKEND == "ollama":
+    logging.getLogger("orbit007").info(
+        "LLM backend: ollama (%s @ %s)", OLLAMA_MODEL, OLLAMA_URL
+    )
+else:
+    logging.getLogger("orbit007").info("LLM backend: %s", LLM_BACKEND)
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import uvicorn
@@ -106,7 +138,53 @@ load_seconds = None
 model_load_lock = threading.Lock()
 
 
+def _ollama_check() -> None:
+    global _ollama_ready
+    if _ollama_ready:
+        return
+    url = f"{OLLAMA_URL}/api/tags"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(
+            f"Ollama is not running at {OLLAMA_URL}. Start it with `ollama serve`."
+        ) from exc
+    except Exception as exc:
+        raise RuntimeError(
+            f"Ollama is not running at {OLLAMA_URL}. Start it with `ollama serve`."
+        ) from exc
+
+    models = data.get("models") or []
+    available = set()
+    for m in models:
+        name = m.get("name") or m.get("model") or ""
+        if name:
+            available.add(name)
+            if name.endswith(":latest"):
+                available.add(name[:-7])
+            else:
+                available.add(f"{name}:latest")
+
+    target = OLLAMA_MODEL
+    matched = (
+        target in available
+        or (target.endswith(":latest") and target[:-7] in available)
+        or (f"{target}:latest" in available)
+    )
+    if not matched:
+        raise RuntimeError(
+            f"Model {OLLAMA_MODEL} not found. Run `ollama pull {OLLAMA_MODEL}`."
+        )
+
+    _ollama_ready = True
+
+
 def ensure_model_loaded() -> None:
+    if LLM_BACKEND == "ollama":
+        _ollama_check()
+        return
     global tokenizer, model, cuda_available, load_seconds
     if model is not None and tokenizer is not None:
         return
@@ -3839,6 +3917,73 @@ def _trim_incomplete(text: str) -> str:
     return text.rstrip()
 
 
+def _generate_ollama(messages: list[dict[str, str]], max_new_tokens: int) -> str:
+    url = f"{OLLAMA_URL}/api/chat"
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": messages,
+        "stream": False,
+        "think": False,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+        "options": {
+            "temperature": 0,
+            "repeat_penalty": 1.05,
+            "num_predict": max_new_tokens,
+            "num_ctx": OLLAMA_NUM_CTX,
+        },
+    }
+    payload_bytes = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload_bytes,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    t0 = time.perf_counter()
+    try:
+        with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as resp:
+            raw_bytes = resp.read()
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"Ollama HTTP error {exc.code}: {exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Ollama connection error: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise RuntimeError(f"Ollama request timed out after {OLLAMA_TIMEOUT}s") from exc
+    except Exception as exc:
+        raise RuntimeError(f"Ollama request failed: {exc}") from exc
+
+    elapsed_seconds = time.perf_counter() - t0
+    try:
+        data = json.loads(raw_bytes.decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"Ollama returned invalid JSON: {exc}") from exc
+
+    message = data.get("message") or {}
+    text = message.get("content") or ""
+    # Strip any <think>...</think> block as a safety net
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+    if data.get("done_reason") == "length":
+        text = _trim_incomplete(text)
+
+    eval_count = data.get("eval_count")
+    eval_duration = data.get("eval_duration")
+    if eval_count is not None and eval_duration and eval_duration > 0:
+        gen_seconds = eval_duration / 1e9
+        tokens_per_sec = eval_count / gen_seconds
+        timing_str = (
+            f"[generation {gen_seconds:.2f}s | "
+            f"{eval_count} tokens | "
+            f"{tokens_per_sec:.2f} tokens/s]"
+        )
+    else:
+        timing_str = f"[generation {elapsed_seconds:.2f}s]"
+    print(timing_str)
+    logging.getLogger("orbit007").info(timing_str)
+
+    return text
+
+
 def generate_response(
     prompt: str,
     max_new_tokens: int,
@@ -3848,7 +3993,7 @@ def generate_response(
 ) -> str:
     global model, tokenizer
     ensure_model_loaded()
-    if model is None or tokenizer is None:
+    if LLM_BACKEND != "ollama" and (model is None or tokenizer is None):
         from runtime.models import REGISTRY
         if REGISTRY.is_ready("llm"):
             model, tokenizer = REGISTRY.get("llm")
@@ -3896,6 +4041,8 @@ def generate_response(
             )
         model_context = select_generation_context(context, prompt)
         model_messages = [{"role": "system", "content": system_prompt}, *model_context]
+        if LLM_BACKEND == "ollama":
+            return _generate_ollama(model_messages, max_new_tokens)
         process_started = time.perf_counter()
         inputs = tokenizer.apply_chat_template(
             model_messages,
@@ -4086,6 +4233,7 @@ async def health():
     from runtime.models import REGISTRY
     return {
         "status": "ok",
+        "llm_backend": LLM_BACKEND,
         "db_connected": DB_PATH.exists(),
         "db_path": str(DB_PATH),
         "api_version": "spidey-local-2026-11",

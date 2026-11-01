@@ -209,3 +209,63 @@ The assistant was speaking twice simultaneously (duplicate playback) and with a 
   - `test_patch_reminder_complete_and_undo`: Verified 404 on unknown ID, 200 on complete, 200 on future undo, 400 on past one-shot undo without new time, 400 on unparseable time, 200 on past undo with valid new time, and 200 on recurring reminder undo.
   - `test_get_reminders_include_completed`: Verified default active-only filter, `include_completed=true` return shape, and active-first ordering.
 - Full pytest suite: **236 passed, 16 warnings in 63.13s** (100% passing).
+
+---
+
+## 4. Optional Ollama LLM Backend Implementation (Branch: `ollama-backend`)
+
+### Summary of Changes
+Added Ollama as an optional LLM backend while keeping the existing PyTorch / HuggingFace Transformers pipeline as the default backend. The system automatically falls back to Transformers if an unsupported backend name is specified.
+
+### Files Modified & Added
+- **`app.py`**:
+  - Added standard library imports `urllib.request` and `urllib.error`.
+  - Added configuration constants read once at startup from environment variables:
+    - `LLM_BACKEND` (default: `"transformers"`, accepted: `"transformers"`, `"ollama"`)
+    - `OLLAMA_URL` (default: `"http://127.0.0.1:11434"`)
+    - `OLLAMA_MODEL` (default: `"qwen3.5:4b"`)
+    - `OLLAMA_NUM_CTX` (default: `4096`)
+    - `OLLAMA_KEEP_ALIVE` (default: `"5m"`)
+    - `OLLAMA_TIMEOUT` (default: `120`)
+  - Added startup logger reporting the active LLM backend and configuration.
+  - Added helper `_ollama_check()`:
+    - Queries `GET {OLLAMA_URL}/api/tags` with a 5-second timeout.
+    - Matches model name both with and without `:latest` suffix.
+    - Caches verification status in `_ollama_ready`.
+    - Raises descriptive `RuntimeError` if Ollama is unreachable ("Ollama is not running at <url>. Start it with `ollama serve`.") or if the model is missing ("Model <name> not found. Run `ollama pull <name>`.").
+  - Updated `ensure_model_loaded()`:
+    - When `LLM_BACKEND == "ollama"`, delegates to `_ollama_check()` and skips Transformers model loading and CUDA allocation.
+    - When `LLM_BACKEND == "transformers"`, existing model loading remains completely untouched.
+  - Added helper `_generate_ollama(messages, max_new_tokens)`:
+    - POSTs payload to `{OLLAMA_URL}/api/chat` with top-level `think: false`, `stream: false`, `keep_alive: OLLAMA_KEEP_ALIVE`, and options (`temperature: 0`, `repeat_penalty: 1.05`, `num_predict: max_new_tokens`, `num_ctx: OLLAMA_NUM_CTX`).
+    - Strips `<think>...</think>` tags using `re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()`.
+    - Trims incomplete sentences with `_trim_incomplete(text)` when `done_reason == "length"`.
+    - Logs token generation speed (`eval_count` and tokens/sec).
+    - Catches network/timeout/JSON errors and raises `RuntimeError` to trigger existing app fallback replies.
+  - Updated `generate_response(prompt, max_new_tokens, ...)`:
+    - Preserves all prompt formatting and `model_messages` preparation.
+    - Calls `_generate_ollama` inside `generation_lock` when `LLM_BACKEND == "ollama"`.
+    - Bypasses Transformers tokenizer/model checks when backend is Ollama.
+  - Updated `/api/health`:
+    - Added `"llm_backend": LLM_BACKEND`.
+- **`.env.example`**:
+  - Documented commented-out variables for `LLM_BACKEND`, `OLLAMA_URL`, `OLLAMA_MODEL`, `OLLAMA_NUM_CTX`, `OLLAMA_KEEP_ALIVE`, and `OLLAMA_TIMEOUT`.
+- **`tests/test_llm_backend.py`**:
+  - Comprehensive unit test suite with mocked `urllib.request.urlopen` (no real Ollama or GPU required):
+    - `test_default_backend_is_transformers`: verifies default setting and that `_generate_ollama` is never invoked.
+    - `test_ollama_request_body_structure`: verifies top-level `think: false`, `stream: false`, and options parameters.
+    - `test_ollama_think_tags_stripped`: verifies `<think>...</think>` blocks are removed.
+    - `test_ollama_done_reason_length_trims_incomplete`: verifies sentence trimming when truncated.
+    - `test_ollama_connection_error_raises_runtime_error`: verifies user-friendly error on connection failure.
+    - `test_ollama_missing_model_raises_pull_message`: verifies pull instruction on missing model.
+    - `test_ollama_model_matches_with_or_without_latest`: verifies model tag matching flexibility.
+    - `test_unknown_backend_fallback`: verifies unrecognized backend falls back to `"transformers"`.
+    - `test_health_includes_llm_backend`: verifies `llm_backend` presence in `/api/health`.
+
+### Test Results
+- Unit test suite `tests/test_llm_backend.py`: **9 passed in 0.85s**.
+- Full test suite: **245 passed, 16 warnings in 88.35s** (100% passing).
+- **Streaming**: Not included; matches existing non-streaming chat contract for `/ws` and REST endpoints.
+- **Dependencies**: Zero external dependencies introduced; implemented using Python standard library `urllib.request`.
+- **Backward Compatibility**: 100% backward compatible; PyTorch and HuggingFace Transformers remain default with identical signatures and behavior.
+
