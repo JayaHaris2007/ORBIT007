@@ -4123,7 +4123,10 @@ async def lifespan(_: FastAPI):
             CPU_MEMORY_LIMIT,
             generation_lock,
         )
-        await asyncio.to_thread(ensure_model_loaded)
+        # NOTE: load_all_models_eager already fully initialises all backends
+        # (Ollama check + Transformers fallback) and populates the REGISTRY.
+        # Calling ensure_model_loaded() here caused a second Qwen load when
+        # Ollama was configured but not yet reachable at lifespan start.
         _restore_reminders(provider="local")
         try:
             migrated_count = _migrate_legacy_reminders()

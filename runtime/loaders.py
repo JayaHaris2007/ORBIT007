@@ -191,6 +191,24 @@ def check_ollama_running(url: str = "http://127.0.0.1:11434", model_name: str = 
         return False
 
 
+
+def wait_for_ollama(url: str, model_name: str, max_wait: float = 10.0, poll_interval: float = 1.5) -> bool:
+    """
+    Wait up to `max_wait` seconds for Ollama to become reachable at server startup.
+    Polls every `poll_interval` seconds. Returns True if Ollama is up and the model
+    is available within the window, False otherwise (caller falls back to local Qwen).
+    """
+    deadline = time.perf_counter() + max_wait
+    while time.perf_counter() < deadline:
+        if check_ollama_running(url, model_name, timeout=2.0):
+            return True
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_interval, remaining))
+    return False
+
+
 def load_all_models_eager(
     qwen_dir: str,
     gpu_limit: str = "5GiB",
@@ -210,7 +228,10 @@ def load_all_models_eager(
     ollama_active = False
 
     if not force_transformers:
-        ollama_active = check_ollama_running(ollama_url, ollama_model)
+        # At server startup, Ollama may still be binding its port. Wait up to 10 s
+        # before concluding it is absent and falling back to local Qwen weights.
+        log.info("Checking for Ollama at %s (model=%s)...", ollama_url, ollama_model)
+        ollama_active = wait_for_ollama(ollama_url, ollama_model, max_wait=10.0)
 
     if ollama_active:
         log.info(
