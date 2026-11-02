@@ -38,29 +38,17 @@ else:
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-import torch
 import dateparser
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-CPU_THREADS = 4
-CPU_INTEROP_THREADS = 1
-GPU_MEMORY_LIMIT = "5GiB"
-CPU_MEMORY_LIMIT = "6GiB"
 MAX_PROMPT_CHARS = 2000
 MAX_NEW_TOKENS = 512
 DATABASE_PATH = Path(os.environ.get("ORBIT_DB_DIR", Path(__file__).resolve().parent)) / "assistant.db"
 
-# LLM Backend configuration
-LLM_BACKEND = os.environ.get("LLM_BACKEND", "transformers").strip().lower()
-if LLM_BACKEND not in ("transformers", "ollama"):
-    logging.getLogger("orbit007").warning(
-        "Unknown LLM_BACKEND %r; falling back to 'transformers'", LLM_BACKEND
-    )
-    LLM_BACKEND = "transformers"
-
+# LLM Backend configuration (Ollama only)
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:4b").strip()
 try:
@@ -76,14 +64,9 @@ except Exception:
 
 _ollama_ready: bool = False
 
-if LLM_BACKEND == "ollama":
-    logging.getLogger("orbit007").info(
-        "LLM backend: ollama (%s @ %s)", OLLAMA_MODEL, OLLAMA_URL
-    )
-else:
-    logging.getLogger("orbit007").info("LLM backend: %s", LLM_BACKEND)
-
-from transformers import AutoModelForCausalLM, AutoTokenizer
+logging.getLogger("orbit007").info(
+    "LLM backend: ollama (%s @ %s)", OLLAMA_MODEL, OLLAMA_URL
+)
 import uvicorn
 import assistant_tone
 import json
@@ -127,17 +110,6 @@ from research.search_engine import (
     search as web_search,
 )
 
-MODEL_DIR = Path(__file__).resolve().parent / "Models" / "LLM"
-if not (MODEL_DIR / "config.json").is_file():
-    raise FileNotFoundError(f"Local model files were not found in {MODEL_DIR}")
-
-tokenizer = None
-model = None
-cuda_available = False
-load_seconds = None
-model_load_lock = threading.Lock()
-
-
 def _ollama_check() -> None:
     global _ollama_ready
     if _ollama_ready:
@@ -148,10 +120,12 @@ def _ollama_check() -> None:
         with urllib.request.urlopen(req, timeout=5) as resp:
             data = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        _ollama_ready = False
         raise RuntimeError(
             f"Ollama is not running at {OLLAMA_URL}. Start it with `ollama serve`."
         ) from exc
     except Exception as exc:
+        _ollama_ready = False
         raise RuntimeError(
             f"Ollama is not running at {OLLAMA_URL}. Start it with `ollama serve`."
         ) from exc
@@ -174,130 +148,51 @@ def _ollama_check() -> None:
         or (f"{target}:latest" in available)
     )
     if not matched:
+        _ollama_ready = False
         raise RuntimeError(
             f"Model {OLLAMA_MODEL} not found. Run `ollama pull {OLLAMA_MODEL}`."
         )
 
     _ollama_ready = True
+    try:
+        from runtime.models import REGISTRY
+        REGISTRY.register("llm", "ollama", metrics={"backend": "ollama", "model": OLLAMA_MODEL})
+    except Exception:
+        pass
+
+
+def _llm_available() -> bool:
+    """Return True if Ollama is running and has the model, False otherwise."""
+    try:
+        _ollama_check()
+        return True
+    except RuntimeError:
+        return False
+
+
+def _check_ollama_ps() -> dict[str, Any]:
+    """Best effort check of /api/ps for loaded model stats."""
+    url = f"{OLLAMA_URL}/api/ps"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            models = data.get("models") or []
+            for m in models:
+                name = m.get("name") or m.get("model") or ""
+                if name == OLLAMA_MODEL or (name.split(":")[0] == OLLAMA_MODEL.split(":")[0]):
+                    return {
+                        "size_vram": m.get("size_vram"),
+                        "size": m.get("size"),
+                    }
+    except Exception:
+        pass
+    return {}
 
 
 def ensure_model_loaded() -> None:
-    if LLM_BACKEND == "ollama":
-        _ollama_check()
-        return
-    global tokenizer, model, cuda_available, load_seconds
-    if model is not None and tokenizer is not None:
-        return
-    with model_load_lock:
-        if model is not None and tokenizer is not None:
-            return
-        from runtime.models import REGISTRY
-        if REGISTRY.is_ready("llm"):
-            obj = REGISTRY.get("llm")
-            if isinstance(obj, tuple):
-                model, tokenizer = obj
-                cuda_available = torch.cuda.is_available()
-                metrics = REGISTRY.metrics.get("llm", {})
-                load_seconds = metrics.get("load_time", 0.0)
-                return
-            elif obj == "ollama":
-                _ollama_check()
-                return
-        if REGISTRY.status.get("llm") == "failed":
-            raise RuntimeError(f"Qwen LLM failed to load during startup: {REGISTRY.errors.get('llm')}")
-
-        torch.set_num_threads(CPU_THREADS)
-        try:
-            torch.set_num_interop_threads(CPU_INTEROP_THREADS)
-        except RuntimeError as error:
-            if "after parallel work has started" not in str(error):
-                raise
-        cuda_available = torch.cuda.is_available()
-        if not cuda_available and os.environ.get("AI_ALLOW_CPU_LLM") != "1":
-            raise RuntimeError(
-                "CUDA is unavailable. Install a CUDA-enabled PyTorch build, or "
-                "set AI_ALLOW_CPU_LLM=1 to explicitly allow slow CPU mode."
-            )
-        tokenizer = AutoTokenizer.from_pretrained(
-            MODEL_DIR, local_files_only=True
-        )
-        if cuda_available:
-            try:
-                from transformers import BitsAndBytesConfig
-                import bitsandbytes
-            except ImportError as error:
-                raise RuntimeError(
-                    "4-bit CUDA loading requires the installed bitsandbytes package."
-                ) from error
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
-            )
-            model_load_kwargs = {
-                "dtype": "auto",
-                "device_map": "auto",
-                "max_memory": {0: GPU_MEMORY_LIMIT, "cpu": CPU_MEMORY_LIMIT},
-                "quantization_config": quantization_config,
-            }
-        else:
-            model_load_kwargs = {
-                "device_map": "cpu",
-                "dtype": torch.float32,
-            }
-        load_started = time.perf_counter()
-        try:
-            model = AutoModelForCausalLM.from_pretrained(
-                MODEL_DIR,
-                low_cpu_mem_usage=True,
-                local_files_only=True,
-                **model_load_kwargs,
-            )
-        except torch.cuda.OutOfMemoryError as error:
-            raise RuntimeError(
-                "The quantized model does not fit within the 5 GiB GPU and 6 GiB "
-                "RAM placement limits. Close other GPU applications and try again."
-            ) from error
-        load_seconds = time.perf_counter() - load_started
-        from runtime.models import REGISTRY
-        REGISTRY.register("llm", (model, tokenizer))
-        print_device_diagnostics()
-
-
-def print_device_diagnostics() -> None:
-    device_map = getattr(model, "hf_device_map", {}) if model else {}
-    distribution = {"cuda": 0, "cpu": 0, "disk": 0, "other": 0}
-    for device in device_map.values():
-        device_name = str(device)
-        if device_name.startswith("cuda"):
-            distribution["cuda"] += 1
-        elif device_name == "cpu":
-            distribution["cpu"] += 1
-        elif device_name == "disk":
-            distribution["disk"] += 1
-        else:
-            distribution["other"] += 1
-    print("\n--- MODEL DEVICE MAP ---")
-    print(device_map)
-    print("Device-map distribution:", distribution)
-    print("Model loading time:", f"{load_seconds:.2f}s" if load_seconds else "n/a")
-    print("\n--- CUDA STATUS ---")
-    print("CUDA available:", cuda_available)
-    if cuda_available:
-        print("GPU:", torch.cuda.get_device_name(0))
-        print(
-            "GPU memory allocated:",
-            round(torch.cuda.memory_allocated(0) / 1024**3, 2),
-            "GiB",
-        )
-        print(
-            "GPU memory reserved:",
-            round(torch.cuda.memory_reserved(0) / 1024**3, 2),
-            "GiB",
-        )
-    if distribution["disk"]:
-        print("WARNING: disk offload is active.")
+    """Ensure Ollama model is available; raises RuntimeError if unreachable or missing."""
+    _ollama_check()
 
 
 generation_lock = threading.Lock()
@@ -1677,7 +1572,7 @@ def _learning_suggest_for_task(task_id: int) -> None:
 
 def _fallback_llm_for_learning(title: str, topics) -> str | None:
     """Ask the local model to name the best topic; skip when not loaded."""
-    if model is None or tokenizer is None:
+    if not _llm_available():
         return None
     numbered = "\n".join(
         f"{index}. {topic['name']}" for index, topic in enumerate(topics, 1)
@@ -3923,6 +3818,7 @@ def _trim_incomplete(text: str) -> str:
 
 
 def _generate_ollama(messages: list[dict[str, str]], max_new_tokens: int) -> str:
+    global _ollama_ready
     url = f"{OLLAMA_URL}/api/chat"
     payload = {
         "model": OLLAMA_MODEL,
@@ -3951,6 +3847,7 @@ def _generate_ollama(messages: list[dict[str, str]], max_new_tokens: int) -> str
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"Ollama HTTP error {exc.code}: {exc.reason}") from exc
     except urllib.error.URLError as exc:
+        _ollama_ready = False
         raise RuntimeError(f"Ollama connection error: {exc.reason}") from exc
     except TimeoutError as exc:
         raise RuntimeError(f"Ollama request timed out after {OLLAMA_TIMEOUT}s") from exc
@@ -3963,6 +3860,14 @@ def _generate_ollama(messages: list[dict[str, str]], max_new_tokens: int) -> str
     except Exception as exc:
         raise RuntimeError(f"Ollama returned invalid JSON: {exc}") from exc
 
+    _ollama_ready = True
+    try:
+        from runtime.models import REGISTRY
+        if not REGISTRY.is_ready("llm"):
+            REGISTRY.register("llm", "ollama", metrics={"backend": "ollama", "model": OLLAMA_MODEL})
+    except Exception:
+        pass
+
     message = data.get("message") or {}
     text = message.get("content") or ""
     # Strip any <think>...</think> block as a safety net
@@ -3970,6 +3875,14 @@ def _generate_ollama(messages: list[dict[str, str]], max_new_tokens: int) -> str
 
     if data.get("done_reason") == "length":
         text = _trim_incomplete(text)
+
+    prompt_eval_count = data.get("prompt_eval_count")
+    if prompt_eval_count is not None and prompt_eval_count >= OLLAMA_NUM_CTX - 8:
+        logging.getLogger("orbit007").warning(
+            "Prompt evaluation count (%d) >= OLLAMA_NUM_CTX - 8 (%d); prompt was probably truncated.",
+            prompt_eval_count,
+            OLLAMA_NUM_CTX - 8,
+        )
 
     eval_count = data.get("eval_count")
     eval_duration = data.get("eval_duration")
@@ -3996,18 +3909,7 @@ def generate_response(
     memories: list[dict[str, Any]] | None = None,
     on_token: Any | None = None,
 ) -> str:
-    global model, tokenizer
     ensure_model_loaded()
-    if LLM_BACKEND != "ollama" and (model is None or tokenizer is None):
-        from runtime.models import REGISTRY
-        if REGISTRY.is_ready("llm"):
-            obj = REGISTRY.get("llm")
-            if isinstance(obj, tuple):
-                model, tokenizer = obj
-            elif obj == "ollama":
-                pass
-        else:
-            raise RuntimeError("The language model is currently unavailable.")
     if not prompt.strip():
         raise ValueError("Prompt cannot be empty.")
     if len(prompt) > MAX_PROMPT_CHARS:
@@ -4028,7 +3930,7 @@ def generate_response(
                 "first person are facts the user shared about themselves; treat "
                 "them as background about the user and address them as 'you'. "
                 "Lines about you describe you. Use them whenever they are "
-                f"relevant and never contradict them:\n{memory_text}"
+                "relevant and never contradict them:\n" + memory_text
             )
         words = int(max_new_tokens * 0.6)
         system_prompt += (
@@ -4050,60 +3952,7 @@ def generate_response(
             )
         model_context = select_generation_context(context, prompt)
         model_messages = [{"role": "system", "content": system_prompt}, *model_context]
-        if LLM_BACKEND == "ollama":
-            return _generate_ollama(model_messages, max_new_tokens)
-        process_started = time.perf_counter()
-        inputs = tokenizer.apply_chat_template(
-            model_messages,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-        input_device = next(
-            (
-                torch.device(device)
-                for device in getattr(model, "hf_device_map", {}).values()
-                if str(device).startswith("cuda")
-            ),
-            torch.device("cuda:0" if cuda_available else "cpu"),
-        )
-        inputs = inputs.to(input_device)
-        input_len = inputs["input_ids"].shape[-1]
-
-        if cuda_available:
-            torch.cuda.synchronize()
-        process_seconds = time.perf_counter() - process_started
-        generation_started = time.perf_counter()
-        with torch.inference_mode():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                repetition_penalty=1.05,
-            )
-        if cuda_available:
-            torch.cuda.synchronize()
-        generation_seconds = time.perf_counter() - generation_started
-        generated_tokens = outputs.shape[-1] - input_len
-        response = tokenizer.decode(
-            outputs[0][input_len:], skip_special_tokens=True
-        ).strip()
-        if generated_tokens >= max_new_tokens:
-            response = _trim_incomplete(response)
-        print(
-            f"[input {process_seconds:.2f}s | generation {generation_seconds:.2f}s | "
-            f"{generated_tokens} tokens | "
-            f"{generated_tokens / generation_seconds:.2f} tokens/s]"
-        )
-        if cuda_available:
-            print(
-                "[GPU memory: "
-                f"{torch.cuda.memory_allocated(0) / 1024**3:.2f} GiB allocated, "
-                f"{torch.cuda.memory_reserved(0) / 1024**3:.2f} GiB reserved]"
-            )
-        return response
+        return _generate_ollama(model_messages, max_new_tokens)
 
 
 @asynccontextmanager
@@ -4118,10 +3967,7 @@ async def lifespan(_: FastAPI):
         from runtime.loaders import load_all_models_eager
         await asyncio.to_thread(
             load_all_models_eager,
-            MODEL_DIR,
-            GPU_MEMORY_LIMIT,
-            CPU_MEMORY_LIMIT,
-            generation_lock,
+            generation_lock=generation_lock,
         )
         # NOTE: load_all_models_eager already fully initialises all backends
         # (Ollama check + Transformers fallback) and populates the REGISTRY.
@@ -4243,15 +4089,16 @@ app.include_router(voice_ws_router)
 @app.get("/health")
 async def health():
     from runtime.models import REGISTRY
-    return {
+    reachable = _llm_available()
+    ps_info = _check_ollama_ps() if reachable else {}
+    res = {
         "status": "ok",
-        "llm_backend": LLM_BACKEND,
+        "llm_backend": "ollama",
+        "llm_reachable": reachable,
         "db_connected": DB_PATH.exists(),
         "db_path": str(DB_PATH),
         "api_version": "spidey-local-2026-11",
-        "model": "Qwen3-4B",
-        "cuda": cuda_available,
-        "load_seconds": round(load_seconds, 2) if load_seconds is not None else 0.0,
+        "model": OLLAMA_MODEL,
         "database": str(DB_PATH),
         "semantic_memory": os.environ.get("AI_ENABLE_SEMANTIC_MEMORY", "1") != "0",
         "scheduler_running": reminder_scheduler.running if "reminder_scheduler" in globals() else False,
@@ -4259,6 +4106,12 @@ async def health():
         "active_ws_clients": len(ws_manager.active) if "ws_manager" in globals() else 0,
         "models": REGISTRY.get_status_summary() if hasattr(REGISTRY, "get_status_summary") else {},
     }
+    if ps_info:
+        if ps_info.get("size_vram") is not None:
+            res["size_vram"] = ps_info["size_vram"]
+        if ps_info.get("size") is not None:
+            res["size"] = ps_info["size"]
+    return res
 
 
 TOKENS_DEFAULT = 64
@@ -4296,7 +4149,6 @@ def _token_budget(prompt: str) -> int:
 @app.post("/generate")
 @app.post("/api/generate")
 async def generate(payload: dict[str, Any] = Body(...)):
-    await asyncio.to_thread(ensure_model_loaded)
     if not isinstance(payload, dict):
         raise HTTPException(400, "Request body must be a JSON object.")
 
@@ -4348,24 +4200,28 @@ async def generate(payload: dict[str, Any] = Body(...)):
                 "navigate": _page_for_provider(provider),
             }
         memory_store.add_message(chat_id, "user", prompt.strip())
-        context = memory_store.build_context(chat_id, tokenizer, prompt)
+        context = memory_store.build_context(chat_id, None, prompt)
         model_prompt = resolve_short_follow_up(prompt, context)
         if model_prompt != prompt and context:
             context[-1] = {"role": "user", "content": model_prompt}
         memories = _memories_for_prompt(prompt)
-        response = await asyncio.to_thread(
-            generate_response,
-            model_prompt,
-            max_new_tokens,
-            context,
-            memories,
-        )
+        try:
+            response = await asyncio.to_thread(
+                generate_response,
+                model_prompt,
+                max_new_tokens,
+                context,
+                memories,
+            )
+        except RuntimeError as err:
+            logging.getLogger("orbit007").warning("LLM generation failed in chat route: %s", err)
+            response = "I'm having trouble connecting to my local language model right now. Please make sure Ollama is running (`ollama serve`)."
         memory_store.add_message(chat_id, "assistant", response)
         return {
             "response": response,
             "chat_id": chat_id,
             "messages": memory_store.get_messages(chat_id),
-            "provider": "local-qwen",
+            "provider": "ollama",
             "navigate": None,
         }
     except ValueError as error:

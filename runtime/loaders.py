@@ -32,87 +32,6 @@ def get_gpu_memory_gib() -> tuple[float, float]:
         return 0.0, 0.0
 
 
-def check_local_model_files(model_dir: str) -> None:
-    """Verify local model weights exist before offline loading."""
-    offline = os.environ.get("HF_HUB_OFFLINE") == "1"
-    if not os.path.exists(model_dir):
-        msg = (
-            f"Local model directory '{model_dir}' not found. "
-            "If downloading for the first time, start with SPIDEY_ALLOW_HUB=1."
-        )
-        if offline:
-            raise FileNotFoundError(msg)
-        log.warning(msg)
-
-
-def load_qwen_eager(
-    model_dir: str,
-    gpu_limit: str = "5GiB",
-    cpu_limit: str = "6GiB",
-    generation_lock: Any | None = None,
-) -> tuple[Any, Any, float]:
-    """Load Qwen3-4B in 4-bit NF4 quantization once, warm up, and register."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    t0 = time.perf_counter()
-    check_local_model_files(model_dir)
-
-    log.info("Loading Qwen tokenizer from %s...", model_dir)
-    tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
-
-    cuda_available = torch.cuda.is_available()
-    if cuda_available:
-        from transformers import BitsAndBytesConfig
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,
-        )
-        model_kwargs = {
-            "dtype": "auto",
-            "device_map": "auto",
-            "max_memory": {0: gpu_limit, "cpu": cpu_limit},
-            "quantization_config": quantization_config,
-        }
-    else:
-        model_kwargs = {
-            "device_map": "cpu",
-            "dtype": torch.float32,
-        }
-
-    log.info("Loading Qwen causal language model (cuda=%s)...", cuda_available)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_dir,
-        low_cpu_mem_usage=True,
-        local_files_only=True,
-        **model_kwargs,
-    )
-
-    # 1-token warm-up to compile CUDA graph and initialize buffers
-    log.info("Warming up Qwen model (max_new_tokens=1)...")
-    prompt = "Hello"
-    inputs = tokenizer([prompt], return_tensors="pt")
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
-    if generation_lock is not None:
-        with generation_lock:
-            with torch.inference_mode():
-                model.generate(**inputs, max_new_tokens=1)
-    else:
-        with torch.inference_mode():
-            model.generate(**inputs, max_new_tokens=1)
-
-    load_time = time.perf_counter() - t0
-    alloc_gib, _ = get_gpu_memory_gib()
-    log.info(
-        "Qwen LLM ready in %.2fs (device=%s, VRAM allocated=%.2f GiB).",
-        load_time,
-        getattr(model, "device", "cpu"),
-        alloc_gib,
-    )
-    return model, tokenizer, load_time
-
-
 def load_omnivoice_eager(generation_lock: Any | None = None) -> tuple[Any, float]:
     """Load OmniVoice once, warm up with one short synthesis, and register."""
     from voice.tts import OmniVoiceEngine
@@ -210,32 +129,22 @@ def wait_for_ollama(url: str, model_name: str, max_wait: float = 10.0, poll_inte
 
 
 def load_all_models_eager(
-    qwen_dir: str,
-    gpu_limit: str = "5GiB",
-    cpu_limit: str = "6GiB",
     generation_lock: Any | None = None,
 ) -> None:
     """Load all models sequentially once at server startup. Never crashes the server."""
     log.info("=== BEGINNING SINGLE-PROCESS EAGER MODEL INITIALIZATION ===")
     total_start = time.perf_counter()
 
-    # 1. LLM (Check if Ollama model is running; if not, load our local model)
+    # 1. LLM (Ollama only)
     ollama_url = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").strip()
     ollama_model = os.environ.get("OLLAMA_MODEL", "qwen3.5:4b").strip()
-    configured_backend = os.environ.get("LLM_BACKEND", "").strip().lower()
 
-    force_transformers = configured_backend == "transformers"
-    ollama_active = False
-
-    if not force_transformers:
-        # At server startup, Ollama may still be binding its port. Wait up to 10 s
-        # before concluding it is absent and falling back to local Qwen weights.
-        log.info("Checking for Ollama at %s (model=%s)...", ollama_url, ollama_model)
-        ollama_active = wait_for_ollama(ollama_url, ollama_model, max_wait=10.0)
+    log.info("Checking for Ollama at %s (model=%s)...", ollama_url, ollama_model)
+    ollama_active = wait_for_ollama(ollama_url, ollama_model, max_wait=10.0)
 
     if ollama_active:
         log.info(
-            "Detected running Ollama at %s with model '%s'. Using Ollama backend (skipping local Qwen load).",
+            "Detected running Ollama at %s with model '%s'. Using Ollama backend.",
             ollama_url,
             ollama_model,
         )
@@ -246,30 +155,21 @@ def load_all_models_eager(
         )
         try:
             import app
-            app.LLM_BACKEND = "ollama"
             app._ollama_ready = True
         except Exception:
             pass
     else:
-        if configured_backend == "ollama":
-            log.warning(
-                "LLM_BACKEND is configured as 'ollama', but Ollama is not running at %s (or model '%s' not found). Falling back to local Qwen model.",
-                ollama_url,
-                ollama_model,
-            )
+        err_msg = (
+            f"Ollama is not running at {ollama_url} or model '{ollama_model}' not found. "
+            f"Start Ollama with `ollama serve` and pull the model with `ollama pull {ollama_model}`."
+        )
+        log.warning(err_msg)
+        REGISTRY.fail("llm", err_msg)
         try:
-            model, tokenizer, load_time = load_qwen_eager(
-                qwen_dir, gpu_limit=gpu_limit, cpu_limit=cpu_limit, generation_lock=generation_lock
-            )
-            REGISTRY.register("llm", (model, tokenizer), metrics={"load_time": load_time})
-            try:
-                import app
-                app.LLM_BACKEND = "transformers"
-            except Exception:
-                pass
-        except Exception as err:
-            log.exception("Eager load failed for Qwen LLM: %s", err)
-            REGISTRY.fail("llm", err)
+            import app
+            app._ollama_ready = False
+        except Exception:
+            pass
 
     # 2. OmniVoice TTS
     try:

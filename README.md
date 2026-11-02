@@ -1,10 +1,10 @@
 # Local AI Voice Interface
 
-This project combines the local models and modern voice pipeline:
+This project combines an Ollama-powered LLM with a local voice pipeline:
 
-- `Models/LLM/` contains a local Qwen3-4B instruction model for generating text.
-- `voice/` contains the complete voice engine powered by **OmniVoice** (`k2-fsa/OmniVoice`, 0.6B params) for text-to-speech, and `SpeechRecognition` for speech-to-text.
-- `Models/voice/` contains legacy Kokoro v1.0 files (superseded by OmniVoice).
+- **LLM Engine**: High-performance local inference via **Ollama** running `qwen3.5:4b` (~52 tokens/s on GPU).
+- **Voice Stack**: Complete voice engine powered by **OmniVoice** (`k2-fsa/OmniVoice`, 0.6B params in PyTorch) for text-to-speech, and `SpeechRecognition` for speech-to-text.
+- **Memory**: Persistent SQLite memory store with local embedding search via `sentence-transformers`.
 
 `app.py` is the FastAPI backend and terminal interface.
 
@@ -64,99 +64,80 @@ S.P.I.D.E.Y can join a Discord voice channel and speak answers while you type me
 ### Voice Troubleshooting
 - **Microphone access denied in browser**: Ensure your browser allows microphone permissions on `http://localhost:5173`.
 - **CUDA Out of Memory during voice synthesis**: Set `TTS_DEVICE=cpu` in `.env` to run TTS entirely on CPU, or let the automatic fallback take effect.
-- **Discord voice audio not playing**: Verify that `PyNaCl` and `davey` are installed via `pip install "discord.py[voice]"` and that the bot has `Connect` and `Speak` permissions in the voice channel.
+- **Discord voice audio not playing**: Verify that `PyNaCl` and `davey` are installed via `pip install "discord.py[voice]"` and that the bo## Setup
 
-## Setup
+### 1. Prerequisites
 
-Use Python 3.10, 3.11, or 3.12 in a virtual environment. Kokoro 0.9.x
-requires Python 3.10 through 3.12; Python 3.13 and 3.14 cannot install it.
-The current machine's Python 3.14 environment must be replaced, not upgraded
-with another `pip` command.
+- **Python**: 3.10 through 3.14 (Python 3.14 works out of the box).
+- **Ollama**: Download and install from [https://ollama.com](https://ollama.com).
+- **PyTorch**: Required for OmniVoice TTS and sentence-transformers memory search. Install a CUDA-enabled build from [https://pytorch.org/get-started/locally/](https://pytorch.org/get-started/locally/) for GPU acceleration.
+
+### 2. Ollama Setup
+
+Install and pull the recommended model:
 
 ```powershell
-# Check available interpreters. The command below assumes Python 3.11 is listed.
-py -0p
-if (Test-Path .venv) { Remove-Item -LiteralPath .venv -Recurse -Force }
-py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
+ollama pull qwen3.5:4b
+ollama serve
+```
+
+Verify the model is downloaded:
+```powershell
+ollama list
+```
+
+### 3. Python Environment
+
+```powershell
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+python -m pip install -r requirements.gpu.txt
 ```
 
-The LLM uses Qwen's tokenizer and causal language model interface for
-text-only input.
+> [!NOTE]
+> PyTorch, Transformers, and Accelerate remain in `requirements.gpu.txt` because they power the in-process **OmniVoice TTS** engine and **sentence-transformers** semantic memory search. The LLM itself runs entirely through Ollama.
 
-For NVIDIA GPU acceleration, install the CUDA-enabled PyTorch build for your
-system from the official PyTorch selector at https://pytorch.org/get-started/locally/
-after activating the environment. A normal PyPI install can leave you with a
-CPU-only build. Verify the result before running the app:
+### 4. Configuration (.env)
 
-```powershell
-python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+Configure Ollama parameters in `.env`:
+
+```env
+OLLAMA_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=qwen3.5:4b
+OLLAMA_NUM_CTX=4096
+OLLAMA_KEEP_ALIVE=5m
+OLLAMA_TIMEOUT=120
 ```
 
-The final value should be `True` for the recommended 4-bit GPU mode. The app
-stops with an actionable error if CUDA is unavailable instead of silently
-running the LLM on the CPU. To explicitly allow slow CPU mode for
-troubleshooting, use:
+> [!TIP]
+> On laptops with a 6 GB GPU (e.g. RTX 4050) shared with OmniVoice TTS, set the system environment variable `OLLAMA_MAX_LOADED_MODELS=1` to ensure Ollama does not load multiple models simultaneously into VRAM.
 
-```powershell
-$env:AI_ALLOW_CPU_LLM = "1"
-python app.py
-```
-
-If `py -3.11` is not available, install Python 3.11 or 3.12 from
-https://www.python.org/downloads/windows/ and select **Add python.exe to
-PATH**. Then reopen PowerShell and repeat the commands above, replacing
-`3.11` with the installed version.
-
-Kokoro also requires the `espeak-ng` system executable for phonemization. On
-Windows, install it separately and make sure `espeak-ng` is available on
-`PATH`.
-
-The Qwen3 checkpoint is several gigabytes. The application loads it only from
-the local `Models/LLM/` directory and does not download a second LLM. On the
-6 GB RTX 4050 profile, it uses 4-bit NF4 bitsandbytes quantization, reserves
-up to approximately 5 GiB of GPU memory and 6 GiB of CPU memory, and does not
-use disk offload. If these limits are insufficient, startup stops with an
-error instead of exhausting system RAM or paging the model to disk.
-
-The local checkpoint is **Qwen3-4B** (`Qwen/Qwen3-4B`), with about
-4 billion parameters. The LLM uses CUDA when available in 4-bit NF4, while
-
-OmniVoice runs in float16 on GPU (with CPU fallback).
-
-### Laptop resource safeguards
-
-The default settings are conservative for an RTX 4050 6 GB laptop GPU:
-
-- The LLM uses 4-bit NF4 quantization and is limited to about 5 GiB of VRAM,
-  leaving room for the display driver and generation workspace.
-- CPU placement is limited to 6 GiB. Disk offload is disabled because paging
-  the model on a 16 GB system caused RAM exhaustion and 100% SSD activity.
-- Text generation is capped at 128 new tokens and prompts at 2,000 characters.
-- Kokoro runs on the CPU so it cannot compete with the LLM for GPU memory.
-- CPU inference is limited to four threads and one inter-op thread.
-- CUDA temporary allocations are configured to use expandable segments, which
-  helps reduce memory fragmentation.
-- Startup prints the model device map, placement distribution, load time, and
-  GPU memory allocation. Disk placement is reported as a warning and should
-  normally be absent.
-
-These limits may make generation slower, but they reduce the likelihood of a
-GPU out-of-memory crash. Close other GPU-heavy applications before starting the
-program, and use a shorter prompt if the program reports an out-of-memory
+horter prompt if the program reports an out-of-memory
 error.
 
 ## Run
 
-Start the FastAPI HTTP server. The local Qwen model is loaded once when this
-process starts, so restarting the server loads the model again; requests reuse
-the already-loaded model:
+### Option 1: One-Click Startup Script (start.bat)
 
+Double-click `start.bat` or run:
 ```powershell
-python app.py --server
+.\start.bat
 ```
+This automatically launches Ollama in the background, starts the FastAPI backend (database & WebSocket agent on port 8000), and launches the Vite React frontend (port 5173).
+
+### Option 2: Manual Startup
+
+1. **Terminal 1 — Ollama**:
+   ```powershell
+   ollama serve
+   ```
+2. **Terminal 2 — Python Backend**:
+   ```powershell
+   python app.py --server
+   ```
+3. **Terminal 3 — Frontend UI**:
+   ```powershell
+   npm run dev
+   ```
 
 For backend development, enable automatic reload explicitly:
 
@@ -398,3 +379,15 @@ Kokoro's Python package may cache its compatible model files on first use.
 The application validates that the selected voice file exists locally before
 starting synthesis. Generated audio is overwritten at `output.wav` after each
 successful response.
+
+
+## Troubleshooting
+
+- **Ollama is not running**: If you see `RuntimeError: Ollama is not running at http://127.0.0.1:11434`, start it with `ollama serve` or launch the Ollama desktop app.
+- **Model not found**: If you see `RuntimeError: Model qwen3.5:4b not found`, run:
+  ```powershell
+  ollama pull qwen3.5:4b
+  ```
+- **Thinking tags appearing in chat**: S.P.I.D.E.Y automatically sends top-level `"think": false` to Ollama and strips any residual `<think>...</think>` blocks as a safety net. Ensure your Ollama installation is updated to v0.4+ (`ollama --version`).
+- **Inference is slow**: Run `ollama ps` while generating. If it reports CPU inference or partial GPU offload, check your NVIDIA GPU drivers and ensure no other heavy process is exhausting VRAM. On an RTX 4050, `qwen3.5:4b` runs 100% on GPU at ~50+ tokens/s.
+- **PyTorch/CUDA VRAM**: PyTorch is still used for OmniVoice TTS. If CUDA runs out of memory, set `TTS_DEVICE=cpu` in `.env` to run voice synthesis on CPU.

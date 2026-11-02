@@ -9,6 +9,15 @@ where ollama >nul 2>nul
 if %ERRORLEVEL% EQU 0 (
     echo [1/3] Starting Ollama server in background...
     start "Ollama Engine" /min cmd /c "ollama serve"
+    timeout /t 2 /nobreak >nul
+    ollama list 2>nul | findstr /i "qwen3.5:4b" >nul
+    if %ERRORLEVEL% NEQ 0 (
+        echo [WARNING] Ollama model 'qwen3.5:4b' not found in ollama list!
+        echo Run: ollama pull qwen3.5:4b
+    )
+) else (
+    echo [WARNING] Ollama not found in PATH!
+    echo Please install Ollama from https://ollama.com and run: ollama pull qwen3.5:4b
 )
 
 :: 2. Start FastAPI Backend (Database, Agent WebSocket, REST API on Port 8000)
@@ -27,4 +36,3 @@ echo Backend API: http://127.0.0.1:8000
 echo ========================================================
 echo.
 pause
-

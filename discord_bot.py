@@ -531,7 +531,7 @@ class SpideyBot(commands.Bot):
             async with message.channel.typing():
                 await asyncio.to_thread(app.ensure_model_loaded)
                 context = app.memory_store.build_context(
-                    chat_id, app.tokenizer, prompt
+                    chat_id, None, prompt
                 )
                 memories = app._memories_for_prompt(prompt)
                 response = await asyncio.to_thread(
@@ -638,7 +638,7 @@ class SpideyBot(commands.Bot):
             async with typing_ctx:
                 await asyncio.to_thread(app.ensure_model_loaded)
                 context = app.memory_store.build_context(
-                    chat_id, app.tokenizer, prompt
+                    chat_id, None, prompt
                 )
                 memories = app._memories_for_prompt(prompt)
                 response = await asyncio.to_thread(

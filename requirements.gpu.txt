@@ -1,18 +1,24 @@
+# PyTorch, Transformers, and Accelerate (needed by OmniVoice TTS and memory search)
 torch
 transformers
-accelerate
-bitsandbytes
+accelerate # Required by omnivoice
+sentence-transformers # Semantic memory search
+
+# Voice stack (OmniVoice TTS and SpeechRecognition STT)
+omnivoice
+SpeechRecognition
 soundfile
 numpy
+
+# Web server and framework
 fastapi
 uvicorn[standard]
-sentence-transformers
-discord.py[voice]
-discord-ext-voice-recv
+python-dotenv
 apscheduler
 rapidfuzz
 dateparser
-python-dotenv
 tavily-python
-omnivoice
-SpeechRecognition
+
+# Discord voice & bot integrations
+discord.py[voice]
+discord-ext-voice-recv

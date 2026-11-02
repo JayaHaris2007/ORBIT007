@@ -22,14 +22,8 @@ def _make_mock_response(data: dict, status: int = 200):
     return resp
 
 
-def test_default_backend_is_transformers():
-    """Verify default backend is 'transformers' and _generate_ollama is never called."""
-    assert app.LLM_BACKEND == "transformers"
-
-
 def test_ollama_request_body_structure(monkeypatch, temp_db):
-    """With LLM_BACKEND=ollama, request body has think: False, stream: False, options.num_predict, and options.num_ctx."""
-    monkeypatch.setattr(app, "LLM_BACKEND", "ollama")
+    """Request body has think: False, stream: False, options.num_predict, and options.num_ctx."""
     monkeypatch.setattr(app, "_ollama_ready", True)
 
     captured_requests = []
@@ -68,7 +62,6 @@ def test_ollama_request_body_structure(monkeypatch, temp_db):
 
 def test_ollama_think_tags_stripped(monkeypatch, temp_db):
     """A reply containing <think>...</think> is stripped cleanly."""
-    monkeypatch.setattr(app, "LLM_BACKEND", "ollama")
     monkeypatch.setattr(app, "_ollama_ready", True)
 
     raw_reply = (
@@ -94,7 +87,6 @@ def test_ollama_think_tags_stripped(monkeypatch, temp_db):
 
 def test_ollama_done_reason_length_trims_incomplete(monkeypatch, temp_db):
     """When done_reason is 'length', response is trimmed to the last complete sentence."""
-    monkeypatch.setattr(app, "LLM_BACKEND", "ollama")
     monkeypatch.setattr(app, "_ollama_ready", True)
 
     truncated_reply = "Here is your first instruction. Here is a half finished thought that got cut"
@@ -113,9 +105,29 @@ def test_ollama_done_reason_length_trims_incomplete(monkeypatch, temp_db):
     assert res == "Here is your first instruction."
 
 
+def test_ollama_prompt_truncation_warning(caplog, monkeypatch, temp_db):
+    """When prompt_eval_count >= OLLAMA_NUM_CTX - 8, a warning is logged."""
+    monkeypatch.setattr(app, "_ollama_ready", True)
+
+    def mock_urlopen(req, timeout=None):
+        return _make_mock_response({
+            "message": {"role": "assistant", "content": "Understood."},
+            "done_reason": "stop",
+            "prompt_eval_count": app.OLLAMA_NUM_CTX,  # >= 4088
+            "eval_count": 5,
+            "eval_duration": 50_000_000,
+        })
+
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
+
+    with caplog.at_level(logging.WARNING, logger="orbit007"):
+        res = app.generate_response("long prompt test", 32)
+        assert res == "Understood."
+        assert any("probably truncated" in record.message for record in caplog.records)
+
+
 def test_ollama_connection_error_raises_runtime_error(monkeypatch):
     """Connection error raises RuntimeError with 'not running' and 'ollama serve'."""
-    monkeypatch.setattr(app, "LLM_BACKEND", "ollama")
     monkeypatch.setattr(app, "_ollama_ready", False)
     monkeypatch.setattr(app, "ensure_model_loaded", _ORIGINAL_ENSURE_MODEL_LOADED)
 
@@ -134,7 +146,6 @@ def test_ollama_connection_error_raises_runtime_error(monkeypatch):
 
 def test_ollama_missing_model_raises_pull_message(monkeypatch):
     """Missing model raises RuntimeError with 'not found' and 'ollama pull'."""
-    monkeypatch.setattr(app, "LLM_BACKEND", "ollama")
     monkeypatch.setattr(app, "_ollama_ready", False)
     monkeypatch.setattr(app, "OLLAMA_MODEL", "qwen3.5:4b")
     monkeypatch.setattr(app, "ensure_model_loaded", _ORIGINAL_ENSURE_MODEL_LOADED)
@@ -159,7 +170,6 @@ def test_ollama_missing_model_raises_pull_message(monkeypatch):
 
 def test_ollama_model_matches_with_or_without_latest(monkeypatch):
     """Model name match succeeds whether or not ':latest' tag is explicit."""
-    monkeypatch.setattr(app, "LLM_BACKEND", "ollama")
     monkeypatch.setattr(app, "_ollama_ready", False)
     monkeypatch.setattr(app, "OLLAMA_MODEL", "qwen3.5:4b")
     monkeypatch.setattr(app, "ensure_model_loaded", _ORIGINAL_ENSURE_MODEL_LOADED)
@@ -175,33 +185,40 @@ def test_ollama_model_matches_with_or_without_latest(monkeypatch):
     assert app._ollama_ready is True
 
 
-def test_unknown_backend_fallback(caplog):
-    """Unknown LLM_BACKEND value logs a warning and falls back to transformers."""
-    with caplog.at_level(logging.WARNING):
-        raw_val = "non_existent_engine"
-        backend = raw_val.strip().lower()
-        if backend not in ("transformers", "ollama"):
-            logging.getLogger("orbit007").warning(
-                "Unknown LLM_BACKEND %r; falling back to 'transformers'", backend
-            )
-            backend = "transformers"
+def test_health_includes_llm_backend_and_ps_data(temp_db, monkeypatch):
+    """The /api/health endpoint includes llm_backend, llm_reachable, and size_vram from /api/ps."""
+    def mock_urlopen(req, timeout=None):
+        url = req.full_url if hasattr(req, "full_url") else str(req)
+        if "/api/tags" in url:
+            return _make_mock_response({
+                "models": [{"name": app.OLLAMA_MODEL}]
+            })
+        elif "/api/ps" in url:
+            return _make_mock_response({
+                "models": [{
+                    "name": app.OLLAMA_MODEL,
+                    "size_vram": 2147483648,
+                    "size": 3324173934,
+                }]
+            })
+        return _make_mock_response({})
 
-    assert backend == "transformers"
-    assert "falling back to 'transformers'" in caplog.text
+    monkeypatch.setattr(app, "_ollama_ready", True)
+    monkeypatch.setattr(urllib.request, "urlopen", mock_urlopen)
 
-
-def test_health_includes_llm_backend(temp_db):
-    """The /api/health endpoint includes llm_backend key."""
     client = TestClient(app.app)
     res = client.get("/api/health")
     assert res.status_code == 200
     data = res.json()
-    assert "llm_backend" in data
-    assert data["llm_backend"] in ("transformers", "ollama")
+    assert data["llm_backend"] == "ollama"
+    assert data["llm_reachable"] is True
+    assert data["model"] == app.OLLAMA_MODEL
+    assert data.get("size_vram") == 2147483648
+    assert data.get("size") == 3324173934
 
 
-def test_eager_loads_ollama_and_skips_local_qwen(monkeypatch):
-    """When Ollama is running, load_all_models_eager registers ollama and never loads local Qwen."""
+def test_eager_loads_ollama(monkeypatch):
+    """When Ollama is running, load_all_models_eager registers ollama."""
     import runtime.loaders as loaders
     from runtime.models import REGISTRY
 
@@ -210,20 +227,13 @@ def test_eager_loads_ollama_and_skips_local_qwen(monkeypatch):
     orig_errors = dict(REGISTRY.errors)
     orig_metrics = dict(REGISTRY.metrics)
 
-    qwen_loaded = []
-    def mock_load_qwen(*args, **kwargs):
-        qwen_loaded.append(True)
-        return MagicMock(), MagicMock(), 1.0
-
-    monkeypatch.setattr(loaders, "check_ollama_running", lambda *args, **kwargs: True)
-    monkeypatch.setattr(loaders, "load_qwen_eager", mock_load_qwen)
+    monkeypatch.setattr(loaders, "wait_for_ollama", lambda *args, **kwargs: True)
     monkeypatch.setattr(loaders, "load_omnivoice_eager", lambda *args, **kwargs: (MagicMock(), 1.0))
     monkeypatch.setattr(loaders, "load_embedder_eager", lambda *args, **kwargs: (MagicMock(), 1.0))
     monkeypatch.setattr(loaders, "load_stt_eager", lambda *args, **kwargs: MagicMock())
 
     try:
-        loaders.load_all_models_eager("dummy_dir")
-        assert len(qwen_loaded) == 0, "load_qwen_eager should not have been called when Ollama is running!"
+        loaders.load_all_models_eager()
         assert REGISTRY.is_ready("llm") is True
         assert REGISTRY.get("llm") == "ollama"
     finally:
@@ -233,8 +243,8 @@ def test_eager_loads_ollama_and_skips_local_qwen(monkeypatch):
         REGISTRY.metrics = orig_metrics
 
 
-def test_eager_falls_back_to_local_qwen_when_ollama_unavailable(monkeypatch):
-    """When Ollama is not running, load_all_models_eager falls back to load_qwen_eager."""
+def test_eager_fails_llm_when_ollama_unavailable(monkeypatch):
+    """When Ollama is not running, load_all_models_eager marks llm as failed without crashing."""
     import runtime.loaders as loaders
     from runtime.models import REGISTRY
 
@@ -243,25 +253,15 @@ def test_eager_falls_back_to_local_qwen_when_ollama_unavailable(monkeypatch):
     orig_errors = dict(REGISTRY.errors)
     orig_metrics = dict(REGISTRY.metrics)
 
-    mock_model = MagicMock()
-    mock_tok = MagicMock()
-    qwen_loaded = []
-
-    def mock_load_qwen(*args, **kwargs):
-        qwen_loaded.append(True)
-        return mock_model, mock_tok, 1.25
-
-    monkeypatch.setattr(loaders, "check_ollama_running", lambda *args, **kwargs: False)
-    monkeypatch.setattr(loaders, "load_qwen_eager", mock_load_qwen)
+    monkeypatch.setattr(loaders, "wait_for_ollama", lambda *args, **kwargs: False)
     monkeypatch.setattr(loaders, "load_omnivoice_eager", lambda *args, **kwargs: (MagicMock(), 1.0))
     monkeypatch.setattr(loaders, "load_embedder_eager", lambda *args, **kwargs: (MagicMock(), 1.0))
     monkeypatch.setattr(loaders, "load_stt_eager", lambda *args, **kwargs: MagicMock())
 
     try:
-        loaders.load_all_models_eager("dummy_dir")
-        assert len(qwen_loaded) == 1, "load_qwen_eager should be called as fallback when Ollama is offline!"
-        assert REGISTRY.is_ready("llm") is True
-        assert REGISTRY.get("llm") == (mock_model, mock_tok)
+        loaders.load_all_models_eager()
+        assert REGISTRY.status.get("llm") == "failed"
+        assert "Ollama is not running" in REGISTRY.errors.get("llm", "")
     finally:
         REGISTRY._items = orig_items
         REGISTRY.status = orig_status
