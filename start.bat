@@ -7,10 +7,10 @@ echo ========================================================
 
 :: 0. Activate Virtual Environment (venv) if present
 if exist "venv\Scripts\activate.bat" (
-    echo [INFO] Activating virtual environment (venv)...
+    echo [INFO] Activating virtual environment: venv
     call "venv\Scripts\activate.bat"
 ) else if exist ".venv\Scripts\activate.bat" (
-    echo [INFO] Activating virtual environment (.venv)...
+    echo [INFO] Activating virtual environment: .venv
     call ".venv\Scripts\activate.bat"
 ) else (
     echo [WARNING] No venv found! Running with system Python.
@@ -21,7 +21,7 @@ where ollama >nul 2>nul
 if %ERRORLEVEL% EQU 0 (
     echo [1/3] Starting Ollama server in background...
     start "Ollama Engine" /min cmd /c "ollama serve"
-    timeout /t 2 /nobreak >nul
+    ping -n 3 127.0.0.1 >nul
     ollama list 2>nul | findstr /i "qwen3.5:4b" >nul
     if %ERRORLEVEL% NEQ 0 (
         echo [WARNING] Ollama model 'qwen3.5:4b' not found in ollama list!
@@ -33,7 +33,7 @@ if %ERRORLEVEL% EQU 0 (
 )
 
 :: 2. Start FastAPI Backend (Database, Agent WebSocket, REST API on Port 8000)
-echo [2/3] Starting Python Backend with activated venv (Port 8000)...
+echo [2/3] Starting Python Backend with activated venv: Port 8000
 if exist "venv\Scripts\activate.bat" (
     start "Spidey Backend" cmd /k "call venv\Scripts\activate.bat && python app.py --server"
 ) else if exist ".venv\Scripts\activate.bat" (
@@ -43,7 +43,7 @@ if exist "venv\Scripts\activate.bat" (
 )
 
 :: 3. Start Vite Frontend (Port 5173)
-echo [3/3] Starting Frontend Web UI (Port 5173)...
+echo [3/3] Starting Frontend Web UI: Port 5173
 start "Spidey Frontend" cmd /k "npm --prefix frontend run dev"
 
 echo.
