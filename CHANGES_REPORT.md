@@ -279,3 +279,77 @@ Added Ollama as an optional LLM backend while keeping the existing PyTorch / Hug
 - **Dependencies**: Zero external dependencies introduced; implemented using Python standard library `urllib.request`.
 - **Backward Compatibility**: 100% backward compatible; PyTorch and HuggingFace Transformers remain default with identical signatures and behavior.
 
+
+
+---
+
+## 5. Complete Migration to Ollama-Only LLM Backend (Branch: `ollama-only`)
+
+### Overview
+Completely removed the local Qwen-via-PyTorch/Transformers LLM execution path and associated bitsandbytes 4-bit configuration. S.P.I.D.E.Y now runs solely on Ollama (`qwen3.5:4b`), providing ~56.1 tokens/s generation speed, 100% GPU offloading, instant startup, and freeing up ~8.04 GB of disk space and ~2.5 GB of GPU VRAM. In-process PyTorch remains exclusively for OmniVoice TTS, Whisper STT, and sentence-transformers memory search.
+
+### Files Modified & Added (One line each)
+- **`.env.example`**: Removed `LLM_BACKEND` switch, activated and documented active `OLLAMA_*` settings, and added `OLLAMA_MAX_LOADED_MODELS=1` guidance.
+- **`README.md`**: Replaced all legacy HuggingFace/4-bit Transformers Qwen setup with Ollama installation (`qwen3.5:4b`), `start.bat`, and troubleshooting.
+- **`app.py`**: Removed PyTorch/Transformers LLM code (`AutoModelForCausalLM`, `AutoTokenizer`, `GPU_MEMORY_LIMIT`, `MODEL_DIR`, `model.generate`, etc.), migrated strictly to Ollama with `think: false`, fixed learning-fallback bug, updated `/api/health` with `llm_backend: ollama`, `llm_reachable: bool`, and `/api/ps` metrics.
+- **`discord_bot.py`**: Updated `memory_store.build_context` calls to pass `None` for tokenizer (relying on `len//4 + 8` character fallback).
+- **`requirements.gpu.txt`**: Removed `bitsandbytes`, preserved `accelerate` (required by `omnivoice`) and in-process voice/memory dependencies (`torch`, `transformers`, `sentence-transformers`, `omnivoice`, `SpeechRecognition`).
+- **`runtime/loaders.py`**: Removed `load_qwen_eager`, `check_local_model_files`, and eager Transformers loading; updated `load_all_models_eager` to check Ollama and register `llm` without crashing or loading local Qwen.
+- **`start.bat`**: Added pre-flight check for `ollama list | findstr "qwen3.5:4b"` with clear download instructions without blocking startup.
+- **`tests/test_characterization_chat.py`**: Removed `FakeTokenizer` monkeypatch to exercise `None` tokenizer fallback path.
+- **`tests/test_llm_backend.py`**: Removed tests for legacy default/unknown backend switching, added tests for prompt truncation warning, `/api/ps` health metrics, and eager Ollama loading.
+- **`tests/test_ollama_only.py`**: New comprehensive test suite (6 tests) covering missing `Models/LLM`, learning fallback bug fix, degraded offline startup, live recovery without restart, `build_context(..., None, ...)`, and static forbidden-symbol guard.
+- **`scripts/verify_ollama_features.py`**: New automated 18-point verification suite for Ollama direct metrics, speed, health, chat, multi-turn, long-context, rules-first commands, reminders, task recommendation, WebSocket Agent Mode, and concurrency.
+- **`VERIFICATION_REPORT.md`**: Comprehensive live verification report with automated measurements, timing, and owner manual checklists.
+- **`Models/LLM/*` (10 tracked metadata files `git rm`'d)**: Deleted tracked configuration and tokenizer files.
+
+### Code Removed
+- Deleted all `transformers` and `torch` LLM imports and globals in `app.py`: `AutoModelForCausalLM`, `AutoTokenizer`, `tokenizer`, `model`, `cuda_available`, `load_seconds`, `model_load_lock`, `print_device_diagnostics()`.
+- Deleted `MODEL_DIR` and the hard import-time check `if not (MODEL_DIR / "config.json").is_file(): raise FileNotFoundError`.
+- Deleted `LLM_BACKEND` switch and all conditional branching between Transformers and Ollama.
+- Deleted Transformers model loading in `ensure_model_loaded()` and `model.generate()` branch in `generate_response()`.
+- Deleted `check_local_model_files` and `load_qwen_eager` in `runtime/loaders.py`.
+- Deleted `bitsandbytes` from `requirements.gpu.txt`.
+
+### Test Results (Before / After)
+- **Baseline Test Run (`ollama-only` before edits):** 247 passed, 16 warnings in 48.37s (0 failed, 0 skipped).
+- **Post-Migration Full Suite:** **252 passed, 16 warnings in 70.64s** (0 failed, 0 skipped; +5 net new passing tests).
+- **Static Guard Check:** Passed (`grep -nE "AutoModel|AutoTokenizer|BitsAndBytes|bitsandbytes|model\.generate|apply_chat_template" app.py` returns 0 matches).
+- **Live Verification Script (`scripts/verify_ollama_features.py`):** **18/18 checks executed** — 11 automated PASS, 1 WARN (soft memory check), 4 SKIP (clean prerequisites documented), 2 MANUAL checklists. Overall automated result: **PASSED (exit code 0)**.
+
+### Live Verification Summary
+- **Direct Ollama Generation Speed:** **56.1 tokens/s** (exceeds the ~50 tokens/s baseline).
+- **Ollama VRAM Allocation (`size_vram`):** **2995.0 MB** (100% offloaded to GPU).
+- **In-process PyTorch VRAM:** **1.90 GiB** for OmniVoice TTS + STT + sentence-transformers (leaving 4.10 GiB free on 6 GB GPU).
+- **Warm Chat Latency:** **0.02s** (rules-first / warm LLM < 1.4s).
+- **Thinking Tag Suppression:** Verified `think: false` and regex stripping completely prevent `<think>` / "Thinking Process" leakage.
+- **Multi-turn Context:** Verified `None` tokenizer successfully preserves context across turns ("teal").
+- **Rules-first Commands:** Tasks and habits executed locally with **0.10s** max latency without invoking Ollama.
+- **Agent Mode WebSocket (`/ws`):** Successfully streamed agent response and generated full TTS audio WAV (311,084 bytes).
+- **Concurrency:** 3 parallel chat requests completed in **1.21s** without deadlock.
+
+### Untracked Local Weights To Delete
+The following untracked PyTorch weights from the legacy Transformers Qwen path can now be safely deleted by the owner to reclaim disk space:
+- `Models/LLM/model-00001-of-00003.safetensors` (~3.96 GB)
+- `Models/LLM/model-00002-of-00003.safetensors` (~3.99 GB)
+- `Models/LLM/model-00003-of-00003.safetensors` (~99.6 MB)
+- **Total Reclaimable Space:** **~8.04 GB**
+
+```powershell
+# Command to reclaim ~8.04 GB:
+Remove-Item -Recurse -Force Models/LLM
+```
+
+### Recommended Post-Verification `pip uninstall`
+`bitsandbytes` is no longer used by the application and can be removed:
+```powershell
+pip uninstall -y bitsandbytes
+```
+*(Do NOT uninstall `accelerate`, `torch`, `transformers`, `sentence-transformers`, `omnivoice`, or `SpeechRecognition` as they are still required by OmniVoice TTS, Whisper STT, and memory search).*
+
+### Assumptions & Risks
+- **Ollama Dependency:** Ollama must be running (`ollama serve`) with `qwen3.5:4b` pulled (`ollama pull qwen3.5:4b`). If Ollama is offline, the backend starts degraded without crashing, serving rules-first commands and returning friendly guidance for chat.
+- **Single Model in VRAM:** On 6 GB VRAM GPUs shared with OmniVoice TTS (~1.9 GB), recommend setting `OLLAMA_MAX_LOADED_MODELS=1` in the system environment to prevent Ollama from holding multiple models in VRAM simultaneously.
+
+### Colab / Notebook Caveat
+`spidey_colab_basic.ipynb` and `spidey_api_bridge.py` were intentionally preserved without edits per ground rules. Running the backend directly in Google Colab will now require Ollama to be installed in the Colab instance (`curl -fsSL https://ollama.ai/install.sh | sh && ollama serve & ollama pull qwen3.5:4b`), as the Transformers Qwen LLM path has been completely removed. Lines in `spidey_colab_basic.ipynb` mentioning Qwen include cells downloading or loading `Qwen/Qwen2.5-Coder-3B-Instruct` or referencing `Models/LLM`.
