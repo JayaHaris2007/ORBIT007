@@ -353,3 +353,65 @@ pip uninstall -y bitsandbytes
 
 ### Colab / Notebook Caveat
 `spidey_colab_basic.ipynb` and `spidey_api_bridge.py` were intentionally preserved without edits per ground rules. Running the backend directly in Google Colab will now require Ollama to be installed in the Colab instance (`curl -fsSL https://ollama.ai/install.sh | sh && ollama serve & ollama pull qwen3.5:4b`), as the Transformers Qwen LLM path has been completely removed. Lines in `spidey_colab_basic.ipynb` mentioning Qwen include cells downloading or loading `Qwen/Qwen2.5-Coder-3B-Instruct` or referencing `Models/LLM`.
+
+---
+
+## 6. Native Ollama Tool Calling Architecture (Agent Mode)
+
+### Overview
+Integrated native function/tool calling using Ollama and `qwen3.5:4b`, allowing the assistant to autonomously operate the entire application (tasks, habits, reminders, memories, consolidated dashboard overview, web search, and desktop UI navigation) from free-form natural language.
+
+### Files Added & Modified
+- **`agent/deps.py`**: Dataclass `AgentDeps` for clean dependency injection from `app.py` without circular imports.
+- **`agent/confirm.py`**: `ConfirmationManager` and `PendingAction` providing human-in-the-loop state machine with 120s TTL for destructive tools.
+- **`agent/tools.py`**: Registry with 18 tools (<40 words per description, compact JSON schemas, rapidfuzz fuzzy matching, prompt injection defense, channel authorization).
+- **`agent/loop.py`**: Multi-turn agent loop executing up to 4 rounds, budget monitoring (60s turn timeout), token limit guards, and UI action emission.
+- **`agent/__init__.py`**: Public package exports.
+- **`app.py`**:
+  - Removed prompt restrictions claiming the assistant cannot manage tasks/habits/reminders.
+  - Injected `agent_deps` and `confirmation_mgr`.
+  - Added `respond_with_tools()` implementing the 4-step turn order (Pending confirmation -> Rules -> Tool loop -> Reply).
+  - Integrated into `/generate`, `/api/generate`, `/ws`, and `/api/chat`.
+  - Superseded XML `<tool_call>` parsing.
+- **`discord_bot.py`**: Integrated confirmation checks, rules check, and `channel="discord"` agent tool calling.
+- **Frontend Integration**:
+  - `frontend/src/context/AppDataContext.jsx`: Registered `orbit:refresh` event listener to reload live data immediately upon mutations.
+  - `frontend/src/useOrbitAgent.js`: Handles `ui_actions` payload, dispatching `orbit:navigate` and `orbit:refresh`.
+  - `frontend/src/components/AssistantSidebar.jsx`: Dispatches navigation and refresh events.
+- **`start.bat`**: Updated launcher to automatically activate virtual environment (`venv\Scripts\activate.bat`) in both the launcher and the backend server process.
+- **`tests/test_agent_confirm.py`**: 8 unit tests covering pending request, affirmative execution, negative cancellation, timeout expiry, and entity deletion.
+- **`tests/test_agent_tools.py`**: 15 unit tests covering schemas, parameter validation, CRUD, entity resolution, and prompt injection guards.
+- **`tests/test_agent_loop.py`**: 7 unit tests covering scripted turns, chained tools, fallback, and UI actions.
+- **`tests/agent_eval_cases.json`**: 74 realistic test cases across 12 distinct categories.
+- **`scripts/eval_tool_calling.py`**: Automated evaluation harness running all 74 cases against live Ollama with an isolated SQLite database.
+- **`AGENT_EVAL_REPORT.md`**: Live evaluation report with metrics, gates, and category breakdowns.
+- **`AGENT_TOOLS.md`**: Complete architecture guide, tool catalog, schemas, and developer guide.
+
+### Test Suite Status (Before / After)
+- **Baseline Test Suite:** 252 passed, 16 warnings in 70.64s.
+- **Post-Implementation Full Suite:** **282 passed, 16 warnings in 58.17s** (+30 net new passing tests; 0 failures, 0 skipped).
+
+### Evaluation Quality Gates (`qwen3.5:4b` on live Ollama)
+| Gate / Metric | Measured | Target Threshold | Status |
+|---|---|---|---|
+| **Tool Selection Accuracy** | **97.3%** (72/74) | $\ge 90\%$ | **PASS** |
+| **Argument Correctness** | **100.0%** (47/47) | $\ge 85\%$ | **PASS** |
+| **No-Tool (Chat/Code) Accuracy** | **100.0%** (6/6) | $\ge 95\%$ | **PASS** |
+| **Destructive Confirmation Safety** | **0 violations** | 0 violations | **PASS** |
+| **Zero Hallucinated Biography** | **0 facts invented** | 0 facts | **PASS** |
+| **Median Turn Latency** | **2.24s** (min 1.19s, max 10.32s) | $< 6.0\text{s}$ | **PASS** |
+| **Overall Case Success Rate** | **97.3%** (72/74) | High | **PASS** |
+
+### Safety Enforcements
+1. **Code-Enforced (Guaranteed):**
+   - Destructive tools (`delete_task`, `delete_habit`, `delete_reminder`, `delete_memory`) return `status: needs_confirmation` without modifying SQLite.
+   - Pending actions strictly expire after 120s.
+   - Prompt injection guard refuses destructive actions if `web_search` was called in the same turn.
+   - `navigate` route parameter is strictly whitelisted against valid frontend pages; ignored on Discord.
+2. **Prompt-Enforced:**
+   - Instruction to query `search_memory` for user facts and truthfully report missing details rather than fabricating biography.
+   - Instruction never to mention JSON, function names, or internal schemas to the user.
+
+### Production Recommendation
+Given 97.3% tool selection accuracy, 100% argument correctness, 0 safety violations, and 2.24s median latency, `ORBIT_TOOLS=1` is recommended as the active default for ORBIT007. Setting `ORBIT_TOOLS=0` in `.env` remains available to instantly restore the legacy plain-chat mode if desired.
+

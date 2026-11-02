@@ -373,6 +373,32 @@ assistant pipeline as the web chat. Restricting `AI_DISCORD_ALLOWED_USER_IDS`
 is strongly recommended, since an empty allowlist lets anyone use the bot. You
 can also set `AI_DISCORD_ALLOWED_GUILD_IDS` to limit it to selected servers.
 
+## Native Tool Calling (Agent Mode)
+
+S.P.I.D.E.Y features native LLM tool calling powered by Ollama and `qwen3.5:4b`. The model can understand natural language requests and operate the app directly:
+
+- **18 Native Tools**: Covers tasks, habits, reminders, notes/memories, consolidated overview, web search, and UI navigation.
+- **Rules First, Tools Second**: Fast deterministic rules in `_handle_local_command` short-circuit before any LLM call (0ms LLM overhead).
+- **Human-in-the-Loop Safety**: Destructive actions (`delete_task`, `delete_habit`, `delete_reminder`, `delete_memory`) require explicit user confirmation.
+- **Prompt Injection Defense**: Content returned from `web_search` is treated as untrusted; destructive actions are blocked if search content is in context.
+- **UI Actions**: The web interface dynamically handles `orbit:navigate` route changes and `orbit:refresh` data synchronization.
+
+See [AGENT_TOOLS.md](AGENT_TOOLS.md) for full tool schemas, architecture details, and developer guide.
+
+### Configuration
+Set in `.env`:
+```env
+ORBIT_TOOLS=1           # Enable tool calling (0 disables tools and restores plain chat)
+ORBIT_TOOL_MODE=native  # Native Ollama function calling API
+```
+
+### Running the Evaluation Harness
+Run the 74-case automated test suite against live Ollama:
+```powershell
+python scripts/eval_tool_calling.py
+```
+This produces an updated evaluation report at `AGENT_EVAL_REPORT.md`.
+
 ## Notes
 
 Kokoro's Python package may cache its compatible model files on first use.

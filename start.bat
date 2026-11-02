@@ -1,8 +1,20 @@
 @echo off
 title S.P.I.D.E.Y Launcher
+cd /d "%~dp0"
 echo ========================================================
 echo         Starting S.P.I.D.E.Y / ORBIT007 Environment
 echo ========================================================
+
+:: 0. Activate Virtual Environment (venv) if present
+if exist "venv\Scripts\activate.bat" (
+    echo [INFO] Activating virtual environment (venv)...
+    call "venv\Scripts\activate.bat"
+) else if exist ".venv\Scripts\activate.bat" (
+    echo [INFO] Activating virtual environment (.venv)...
+    call ".venv\Scripts\activate.bat"
+) else (
+    echo [WARNING] No venv found! Running with system Python.
+)
 
 :: 1. Start Ollama if installed
 where ollama >nul 2>nul
@@ -21,8 +33,14 @@ if %ERRORLEVEL% EQU 0 (
 )
 
 :: 2. Start FastAPI Backend (Database, Agent WebSocket, REST API on Port 8000)
-echo [2/3] Starting Python Backend (Database ^& Agent on Port 8000)...
-start "Spidey Backend" cmd /k "python app.py --server"
+echo [2/3] Starting Python Backend with activated venv (Port 8000)...
+if exist "venv\Scripts\activate.bat" (
+    start "Spidey Backend" cmd /k "call venv\Scripts\activate.bat && python app.py --server"
+) else if exist ".venv\Scripts\activate.bat" (
+    start "Spidey Backend" cmd /k "call .venv\Scripts\activate.bat && python app.py --server"
+) else (
+    start "Spidey Backend" cmd /k "python app.py --server"
+)
 
 :: 3. Start Vite Frontend (Port 5173)
 echo [3/3] Starting Frontend Web UI (Port 5173)...

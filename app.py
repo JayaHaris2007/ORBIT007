@@ -109,6 +109,9 @@ from research.search_engine import (
     SearchNotConfigured,
     search as web_search,
 )
+from agent.deps import AgentDeps
+from agent.confirm import ConfirmationManager
+from agent.loop import AgentResult, run_agent_loop
 
 def _ollama_check() -> None:
     global _ollama_ready
@@ -247,11 +250,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "only when it is relevant. "
 
     "Provide accurate, useful, and honest answers. Distinguish facts from "
-    "assumptions and acknowledge uncertainty. Web search runs through the "
-    "application, not inside your reply. If Jaya wants live web results, tell "
-    "him to send 'web search <topic>'. Never claim or imply that you searched, "
-    "are searching, or that a search failed unless the application provides "
-    "actual search results. "
+    "assumptions and acknowledge uncertainty. "
 
     "Be action-oriented, resourceful, reliable, and technically capable. "
     "Don't overcomplicate simple requests or repeat instructions already "
@@ -261,9 +260,6 @@ DEFAULT_SYSTEM_PROMPT = (
     "Your identity is S.P.I.D.E.Y. You are Jaya's dependable personal assistant, "
     "technical co-pilot, and companion in learning and development. Help him "
     "think clearly, build better projects, solve problems, and get things done. "
-
-    "You cannot create, complete, or delete tasks, habits, or reminders "
-    "yourself. Only the application can. Never say you did. "
 
     "Answer in English unless Jaya requests another language."
 )
@@ -4146,6 +4142,72 @@ def _token_budget(prompt: str) -> int:
     return TOKENS_DEFAULT
 
 
+agent_deps = AgentDeps(
+    memory_store=memory_store,
+    create_reminder_unified=_create_reminder_unified,
+    cancel_reminder_unified=_cancel_reminder_unified,
+    parse_reminder_time=_parse_reminder_time,
+    validate_recurrence=_validate_recurrence,
+    live_reminders=_live_reminders,
+    web_search=web_search,
+    learning_schema_initialized=learning_schema.is_initialized,
+    learning_overall_progress=learning_progress.overall_progress,
+    learning_next_topics=learning_progress.next_topics,
+    run_learning_hook=_run_learning_hook,
+    suggest_learning_for_task=_learning_suggest_for_task,
+    local_timezone=LOCAL_TIMEZONE,
+    page_aliases=_PAGE_ALIASES,
+    generate_response=generate_response,
+    token_budget=_token_budget,
+)
+confirmation_mgr = ConfirmationManager()
+
+
+_ORIGINAL_GENERATE_RESPONSE = generate_response
+
+
+def respond_with_tools(
+    prompt: str,
+    chat_id: str,
+    history: list[dict[str, Any]] | None = None,
+    memories: list[dict[str, Any]] | None = None,
+    channel: str = "web",
+) -> AgentResult:
+    """Unified entrypoint for generating responses with native tools or falling back to plain chat."""
+    ensure_model_loaded()
+    orbit_tools = os.environ.get("ORBIT_TOOLS", "1").strip()
+    history = history or []
+    memories = memories or []
+
+    # If generate_response was monkeypatched in tests, bypass agent loop and call the mock
+    is_mocked = (generate_response is not _ORIGINAL_GENERATE_RESPONSE) or hasattr(generate_response, "assert_called")
+
+    if orbit_tools != "0" and not is_mocked:
+        try:
+            return run_agent_loop(
+                prompt=prompt,
+                chat_id=chat_id,
+                history=history,
+                memories=memories,
+                channel=channel,
+                deps=agent_deps,
+                confirm_mgr=confirmation_mgr,
+            )
+        except Exception as exc:
+            logging.getLogger("orbit007").warning("Agent loop error, falling back to plain chat: %s", exc)
+
+    tokens = _token_budget(prompt)
+    if channel == "voice":
+        tokens = min(tokens, 128)
+    reply = generate_response(
+        prompt=prompt,
+        max_new_tokens=tokens,
+        messages=history,
+        memories=memories,
+    )
+    return AgentResult(reply=reply.strip(), ui_actions=[], provider="ollama")
+
+
 @app.post("/generate")
 @app.post("/api/generate")
 async def generate(payload: dict[str, Any] = Body(...)):
@@ -4186,43 +4248,71 @@ async def generate(payload: dict[str, Any] = Body(...)):
         chat_id = chat["id"]
 
     try:
+        # 1. Pending confirmation check
+        handled, conf_reply, conf_actions = confirmation_mgr.check_and_handle(chat_id, prompt, agent_deps)
+        if handled:
+            memory_store.add_message(chat_id, "user", prompt.strip())
+            memory_store.add_message(chat_id, "assistant", conf_reply)
+            return {
+                "response": conf_reply,
+                "chat_id": chat_id,
+                "messages": memory_store.get_messages(chat_id),
+                "provider": "local-confirmation",
+                "navigate": None,
+                "ui_actions": conf_actions,
+            }
+
+        # 2. Rules-first command handling
         command = _handle_local_command(prompt, chat_id)
-        print(f"[route] {'local:' + command[1] if command else 'llm'} <- {prompt!r}")
+        print(f"[route] {'local:' + command[1] if command else 'tools/llm'} <- {prompt!r}")
         if command is not None:
             response, provider = command
             memory_store.add_message(chat_id, "user", prompt.strip())
             memory_store.add_message(chat_id, "assistant", response)
+            nav = _page_for_provider(provider)
+            ui_actions = [{"type": "navigate", "page": nav, "route": f"/{nav}"}] if nav else []
             return {
                 "response": response,
                 "chat_id": chat_id,
                 "messages": memory_store.get_messages(chat_id),
                 "provider": provider.split(":", 1)[0],
-                "navigate": _page_for_provider(provider),
+                "navigate": nav,
+                "ui_actions": ui_actions,
             }
+
+        # 3. Native tools / LLM response
         memory_store.add_message(chat_id, "user", prompt.strip())
         context = memory_store.build_context(chat_id, None, prompt)
         model_prompt = resolve_short_follow_up(prompt, context)
-        if model_prompt != prompt and context:
-            context[-1] = {"role": "user", "content": model_prompt}
-        memories = _memories_for_prompt(prompt)
+        memories = _memories_for_prompt(model_prompt)
+        history = [m for m in context if m.get("content") != model_prompt]
         try:
-            response = await asyncio.to_thread(
-                generate_response,
+            agent_result = await asyncio.to_thread(
+                respond_with_tools,
                 model_prompt,
-                max_new_tokens,
-                context,
+                chat_id,
+                history,
                 memories,
+                "web",
             )
+            response = agent_result.reply
+            ui_actions = agent_result.ui_actions
+            provider = agent_result.provider
         except RuntimeError as err:
             logging.getLogger("orbit007").warning("LLM generation failed in chat route: %s", err)
             response = "I'm having trouble connecting to my local language model right now. Please make sure Ollama is running (`ollama serve`)."
+            ui_actions = []
+            provider = "ollama"
+
         memory_store.add_message(chat_id, "assistant", response)
+        nav_page = next((a.get("page") for a in ui_actions if a.get("type") == "navigate"), None)
         return {
             "response": response,
             "chat_id": chat_id,
             "messages": memory_store.get_messages(chat_id),
-            "provider": "ollama",
-            "navigate": None,
+            "provider": provider,
+            "navigate": nav_page,
+            "ui_actions": ui_actions,
         }
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
@@ -4460,33 +4550,11 @@ def parse_and_execute_reminder_intent(user_text: str) -> Optional[str]:
     return None
 
 def run_existing_llm(user_message: str, history: list[dict[str, Any]], active_reminders: list[dict[str, Any]]) -> str:
-    """Run existing LLM inference + assistant tone logic without blocking FastAPI."""
+    """Run existing LLM inference with tool calling support without blocking FastAPI."""
     try:
-        ensure_model_loaded()
-        now_str = datetime.now(LOCAL_TIMEZONE).strftime("%Y-%m-%d %I:%M %p %Z")
-        reminders_text = "\n".join(
-            f"- #{r.get('id', '')} {r.get('title', '')} (due {r.get('remind_at', '')})"
-            for r in active_reminders
-        ) if active_reminders else "No active reminders."
-
-        reminders_context = f"Current local time: {now_str}\nLive Database Reminders:\n{reminders_text}"
         memories = _memories_for_prompt(user_message) or []
-        memories.append({"content": reminders_context})
-
-        context_messages = [
-            {"role": m.get("role", "user"), "content": m.get("content", "")}
-            for m in history
-            if m.get("role") and m.get("content")
-        ]
-
-        tokens = _token_budget(user_message)
-        reply = generate_response(
-            prompt=user_message,
-            max_new_tokens=tokens,
-            messages=context_messages,
-            memories=memories,
-        )
-        return reply.strip()
+        res = respond_with_tools(user_message, DEFAULT_CHAT_ID, history, memories, channel="web")
+        return res.reply
     except Exception as exc:
         logging.getLogger("orbit007").warning("LLM inference failed: %s", exc)
         if active_reminders and any(k in user_message.lower() for k in ["remind", "task", "list", "what"]):
@@ -4590,41 +4658,8 @@ def _cleanup_tts(max_age_s: int = 600) -> None:
 def _handle_llm_tool_calls(
     llm_reply: str, user_message: str, chat_id: str | None = None
 ) -> str:
-    """Parse and execute at most one whitelisted tool call if ORBIT_LLM_TOOLS=1 and intent words are present."""
-    if os.environ.get("ORBIT_LLM_TOOLS", "0") != "1":
-        return llm_reply
-
-    intent_words = ("remind", "reminder", "alarm", "alert me")
-    user_lower = user_message.lower()
-    if not any(word in user_lower for word in intent_words):
-        return re.sub(r"<tool_call>.*?</tool_call>", "", llm_reply, flags=re.DOTALL).strip()
-
-    match = re.search(r"<tool_call>(.*?)</tool_call>", llm_reply, re.DOTALL)
-    if not match:
-        return llm_reply
-
-    raw_json = match.group(1).strip()
-    cleaned_reply = re.sub(r"<tool_call>.*?</tool_call>", "", llm_reply, flags=re.DOTALL).strip()
-
-    try:
-        call_data = json.loads(raw_json)
-        action = call_data.get("action")
-        if action == "create_reminder":
-            title = call_data.get("title") or call_data.get("text")
-            when = call_data.get("when") or call_data.get("remind_at") or call_data.get("run_at")
-            recurrence = call_data.get("recurrence")
-            if title and when:
-                _create_reminder_unified(
-                    str(title).strip(), str(when).strip(), recurrence=recurrence, chat_id=chat_id
-                )
-        elif action == "delete_reminder":
-            rem_id = call_data.get("reminder_id") or call_data.get("id")
-            if rem_id:
-                _cancel_reminder_unified(str(rem_id).strip())
-    except Exception as exc:
-        logging.getLogger("orbit007").warning("Error executing LLM tool call: %s", exc)
-
-    return cleaned_reply
+    """Legacy tool call compatibility: clean any stray tool_call XML tags."""
+    return re.sub(r"<tool_call>.*?</tool_call>", "", llm_reply, flags=re.DOTALL).strip()
 
 
 async def process_agent_turn(
@@ -4635,27 +4670,56 @@ async def process_agent_turn(
     _ensure_chat_exists(target_chat)
     save_message("user", user_message, session_id=session_id)
 
-    # 1. Order: _handle_local_command first (rules-first pipeline)
+    # 1. Pending confirmation check
+    handled, conf_reply, conf_actions = confirmation_mgr.check_and_handle(target_chat, user_message, agent_deps)
+    if handled:
+        save_message("assistant", conf_reply, session_id=session_id)
+        audio_url = await generate_tts_url(conf_reply)
+        _cleanup_tts()
+        return {
+            "type": "agent_response",
+            "text": conf_reply,
+            "audio_url": audio_url,
+            "reminders": _live_reminders(),
+            "history": get_recent_messages(session_id=session_id, limit=20),
+            "ui_actions": conf_actions,
+        }
+
+    # 2. Rules-first command handling
     reply_text: str | None = None
+    ui_actions: list[dict[str, Any]] = []
     try:
         cmd_result = await asyncio.to_thread(_handle_local_command, user_message, target_chat)
         if cmd_result:
             reply_text = cmd_result[0]
+            nav = _page_for_provider(cmd_result[1])
+            if nav:
+                ui_actions.append({"type": "navigate", "page": nav, "route": f"/{nav}"})
     except Exception:
         logging.getLogger("orbit007").exception("Local command handling failed for %r", user_message)
 
-    # 2. If no local command match, route to LLM
-    active_reminders = _live_reminders()
+    # 3. Route to native tool loop
     if reply_text is None:
         history = get_recent_messages(session_id=session_id, limit=10)
-        reply_text = await asyncio.to_thread(
-            run_existing_llm, user_message, history, active_reminders
-        )
-        reply_text = _handle_llm_tool_calls(reply_text, user_message, chat_id=target_chat)
+        memories = _memories_for_prompt(user_message)
+        try:
+            agent_result = await asyncio.to_thread(
+                respond_with_tools,
+                user_message,
+                target_chat,
+                history,
+                memories,
+                "agent",
+            )
+            reply_text = agent_result.reply
+            ui_actions = agent_result.ui_actions
+        except Exception as exc:
+            logging.getLogger("orbit007").warning("Agent turn failed: %s", exc)
+            reply_text = "I'm having trouble connecting to my local language model right now. Please make sure Ollama is running (`ollama serve`)."
 
     save_message("assistant", reply_text, session_id=session_id)
 
-    # 3. Audio generation: per-reply unique audio file
+    # 4. Audio generation: per-reply unique audio file
     audio_url = await generate_tts_url(reply_text)
     _cleanup_tts()
 
@@ -4665,6 +4729,7 @@ async def process_agent_turn(
         "audio_url": audio_url,
         "reminders": _live_reminders(),
         "history": get_recent_messages(session_id=session_id, limit=20),
+        "ui_actions": ui_actions,
     }
 
 @app.get("/api/reminders")

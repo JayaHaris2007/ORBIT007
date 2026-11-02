@@ -479,6 +479,33 @@ class SpideyBot(commands.Bot):
             r["id"] for r in app.memory_store.list_reminders(active_only=True)
         }
 
+        handled, conf_reply, _ = await asyncio.to_thread(
+            app.confirmation_mgr.check_and_handle, chat_id, prompt, app.agent_deps
+        )
+        if handled:
+            save_message("assistant", conf_reply, session_id=f"discord_{chat_id}")
+            app.memory_store.add_message(chat_id, "user", prompt)
+            app.memory_store.add_message(chat_id, "assistant", conf_reply)
+            for chunk in _split_response(conf_reply):
+                await message.reply(chunk)
+            return
+
+        handled, conf_reply, _ = await asyncio.to_thread(
+            app.confirmation_mgr.check_and_handle, chat_id, prompt, app.agent_deps
+        )
+        if handled:
+            app.memory_store.add_message(chat_id, "user", prompt)
+            app.memory_store.add_message(chat_id, "assistant", conf_reply)
+            if text_channel is not None:
+                for chunk in _split_response(conf_reply):
+                    await text_channel.send(chunk)
+            voice_mgr = get_discord_voice_manager()
+            if voice_mgr.is_call_active(guild_id):
+                asyncio.create_task(
+                    voice_mgr.speak_text(guild_id, user.id, conf_reply)
+                )
+            return
+
         try:
             command = await asyncio.to_thread(
                 app._handle_local_command, prompt, chat_id
@@ -534,13 +561,15 @@ class SpideyBot(commands.Bot):
                     chat_id, None, prompt
                 )
                 memories = app._memories_for_prompt(prompt)
-                response = await asyncio.to_thread(
-                    app.generate_response,
+                agent_res = await asyncio.to_thread(
+                    app.respond_with_tools,
                     prompt,
-                    app._token_budget(prompt),
+                    chat_id,
                     context,
                     memories,
+                    "discord",
                 )
+                response = agent_res.reply
         except ValueError as error:
             await message.reply(str(error))
             return
@@ -641,13 +670,15 @@ class SpideyBot(commands.Bot):
                     chat_id, None, prompt
                 )
                 memories = app._memories_for_prompt(prompt)
-                response = await asyncio.to_thread(
-                    app.generate_response,
+                agent_res = await asyncio.to_thread(
+                    app.respond_with_tools,
                     prompt,
-                    app._token_budget(prompt),
+                    chat_id,
                     context,
                     memories,
+                    "discord",
                 )
+                response = agent_res.reply
         except ValueError as error:
             if text_channel is not None:
                 await text_channel.send(str(error))

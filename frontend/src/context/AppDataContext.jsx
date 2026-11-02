@@ -15,14 +15,20 @@ export const AppDataProvider = ({ children }) => {
         const onWake = () => {
             if (!document.hidden) refresh();
         };
+        const onOrbitRefresh = () => {
+            refresh();
+        };
         window.addEventListener('focus', onWake);
         document.addEventListener('visibilitychange', onWake);
+        window.addEventListener('orbit:refresh', onOrbitRefresh);
+
         // Light polling keeps the UI honest when the backend changes elsewhere
         // (Discord bot, reminders firing, another browser tab).
         const interval = window.setInterval(onWake, 30000);
         return () => {
             window.removeEventListener('focus', onWake);
             document.removeEventListener('visibilitychange', onWake);
+            window.removeEventListener('orbit:refresh', onOrbitRefresh);
             window.clearInterval(interval);
         };
     }, [refresh]);

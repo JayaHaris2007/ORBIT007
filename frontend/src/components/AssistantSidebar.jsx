@@ -95,6 +95,18 @@ const AssistantSidebar = () => {
         if (route && location.pathname !== route) navigate(route);
     }, [navigate, location.pathname]);
 
+    useEffect(() => {
+        const handleOrbitNav = (e) => {
+            const targetRoute = e.detail?.route;
+            const allowed = ['/dashboard', '/habits', '/todos', '/reminders', '/learning', '/analytics', '/settings'];
+            if (targetRoute && allowed.includes(targetRoute) && location.pathname !== targetRoute) {
+                navigate(targetRoute);
+            }
+        };
+        window.addEventListener('orbit:navigate', handleOrbitNav);
+        return () => window.removeEventListener('orbit:navigate', handleOrbitNav);
+    }, [navigate, location.pathname]);
+
     // Load one conversation and make it the active one.
     const openChat = useCallback(async (id) => {
         const seq = requestSeq.current + 1;
@@ -264,6 +276,18 @@ const AssistantSidebar = () => {
             if (activeChatRef.current !== chatId) return;
             setMessages(data.messages || []);
             if (data.navigate) goToPage(data.navigate);
+            if (Array.isArray(data.ui_actions)) {
+                for (const action of data.ui_actions) {
+                    if (action && action.type === 'refresh') {
+                        window.dispatchEvent(new CustomEvent('orbit:refresh', { detail: { sections: action.sections || [] } }));
+                    } else if (action && action.type === 'navigate' && action.route) {
+                        const allowed = ['/dashboard', '/habits', '/todos', '/reminders', '/learning', '/analytics', '/settings'];
+                        if (allowed.includes(action.route) && location.pathname !== action.route) {
+                            navigate(action.route);
+                        }
+                    }
+                }
+            }
             if (data.response && voice.speakEnabled) {
                 voice.speak(data.response);
             }

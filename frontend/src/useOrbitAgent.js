@@ -208,6 +208,18 @@ export function useOrbitAgent(activeChatIdProp) {
             }
             if (data.reminders) setReminders(data.reminders);
             if (data.audio_url && isSpeakEnabled()) playAudio(data.audio_url);
+            if (Array.isArray(data.ui_actions)) {
+              for (const action of data.ui_actions) {
+                if (action && action.type === 'refresh') {
+                  window.dispatchEvent(new CustomEvent('orbit:refresh', { detail: { sections: action.sections || [] } }));
+                } else if (action && action.type === 'navigate' && action.route) {
+                  const allowed = ['/dashboard', '/habits', '/todos', '/reminders', '/learning', '/analytics', '/settings'];
+                  if (allowed.includes(action.route)) {
+                    window.dispatchEvent(new CustomEvent('orbit:navigate', { detail: { route: action.route, page: action.page } }));
+                  }
+                }
+              }
+            }
           } else if (data.type === 'error') {
             setIsLoading(false);
             console.error('Agent error:', data.error);
