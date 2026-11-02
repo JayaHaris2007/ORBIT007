@@ -1,0 +1,29 @@
+@echo off
+title S.P.I.D.E.Y Launcher
+echo ========================================================
+echo         Starting S.P.I.D.E.Y / ORBIT007 Environment
+echo ========================================================
+
+:: 1. Start Ollama if installed
+where ollama >nul 2>nul
+if %ERRORLEVEL% EQU 0 (
+    echo [1/3] Starting Ollama server in background...
+    start "Ollama Engine" /min cmd /c "ollama serve"
+)
+
+:: 2. Start FastAPI Backend (Database, Agent WebSocket, REST API on Port 8000)
+echo [2/3] Starting Python Backend (Database ^& Agent on Port 8000)...
+start "Spidey Backend" cmd /k "python app.py --server"
+
+:: 3. Start Vite Frontend (Port 5173)
+echo [3/3] Starting Frontend Web UI (Port 5173)...
+start "Spidey Frontend" cmd /k "npm --prefix frontend run dev"
+
+echo.
+echo ========================================================
+echo S.P.I.D.E.Y is starting!
+echo Web UI: http://localhost:5173
+echo Backend API: http://127.0.0.1:8000
+echo ========================================================
+echo.
+pause
