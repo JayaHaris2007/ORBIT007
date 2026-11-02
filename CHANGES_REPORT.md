@@ -262,9 +262,19 @@ Added Ollama as an optional LLM backend while keeping the existing PyTorch / Hug
     - `test_unknown_backend_fallback`: verifies unrecognized backend falls back to `"transformers"`.
     - `test_health_includes_llm_backend`: verifies `llm_backend` presence in `/api/health`.
 
+### Automatic Ollama Detection & Single-Load Optimization
+- **`runtime/loaders.py`**:
+  - Added `check_ollama_running(url, model_name)` which queries `{url}/api/tags` with a 2-second timeout.
+  - In `load_all_models_eager`:
+    - Checks whether Ollama is running with the requested model before loading the local model.
+    - If Ollama is active: skips `load_qwen_eager` entirely, registers `"llm"` as `"ollama"`, and activates the Ollama backend. This saves ~46s of startup latency and ~2.5 GB of GPU VRAM while preventing double-loading of Qwen models.
+    - If Ollama is not active: automatically falls back to loading "our model" (`load_qwen_eager` from `Models/LLM`) using Transformers.
+- **`app.py`**:
+  - Updated `ensure_model_loaded()` and `generate_response()` to handle `"ollama"` string object in `REGISTRY` without tuple unpacking errors.
+
 ### Test Results
-- Unit test suite `tests/test_llm_backend.py`: **9 passed in 0.85s**.
-- Full test suite: **245 passed, 16 warnings in 88.35s** (100% passing).
+- Unit test suite `tests/test_llm_backend.py`: **11 passed in 3.39s** (includes tests for skipping local Qwen when Ollama is running, and falling back to local Qwen when Ollama is offline).
+- Full test suite: **247 passed, 16 warnings in 58.55s** (100% passing).
 - **Streaming**: Not included; matches existing non-streaming chat contract for `/ws` and REST endpoints.
 - **Dependencies**: Zero external dependencies introduced; implemented using Python standard library `urllib.request`.
 - **Backward Compatibility**: 100% backward compatible; PyTorch and HuggingFace Transformers remain default with identical signatures and behavior.

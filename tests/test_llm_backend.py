@@ -198,3 +198,72 @@ def test_health_includes_llm_backend(temp_db):
     data = res.json()
     assert "llm_backend" in data
     assert data["llm_backend"] in ("transformers", "ollama")
+
+
+def test_eager_loads_ollama_and_skips_local_qwen(monkeypatch):
+    """When Ollama is running, load_all_models_eager registers ollama and never loads local Qwen."""
+    import runtime.loaders as loaders
+    from runtime.models import REGISTRY
+
+    orig_items = dict(REGISTRY._items)
+    orig_status = dict(REGISTRY.status)
+    orig_errors = dict(REGISTRY.errors)
+    orig_metrics = dict(REGISTRY.metrics)
+
+    qwen_loaded = []
+    def mock_load_qwen(*args, **kwargs):
+        qwen_loaded.append(True)
+        return MagicMock(), MagicMock(), 1.0
+
+    monkeypatch.setattr(loaders, "check_ollama_running", lambda *args, **kwargs: True)
+    monkeypatch.setattr(loaders, "load_qwen_eager", mock_load_qwen)
+    monkeypatch.setattr(loaders, "load_omnivoice_eager", lambda *args, **kwargs: (MagicMock(), 1.0))
+    monkeypatch.setattr(loaders, "load_embedder_eager", lambda *args, **kwargs: (MagicMock(), 1.0))
+    monkeypatch.setattr(loaders, "load_stt_eager", lambda *args, **kwargs: MagicMock())
+
+    try:
+        loaders.load_all_models_eager("dummy_dir")
+        assert len(qwen_loaded) == 0, "load_qwen_eager should not have been called when Ollama is running!"
+        assert REGISTRY.is_ready("llm") is True
+        assert REGISTRY.get("llm") == "ollama"
+    finally:
+        REGISTRY._items = orig_items
+        REGISTRY.status = orig_status
+        REGISTRY.errors = orig_errors
+        REGISTRY.metrics = orig_metrics
+
+
+def test_eager_falls_back_to_local_qwen_when_ollama_unavailable(monkeypatch):
+    """When Ollama is not running, load_all_models_eager falls back to load_qwen_eager."""
+    import runtime.loaders as loaders
+    from runtime.models import REGISTRY
+
+    orig_items = dict(REGISTRY._items)
+    orig_status = dict(REGISTRY.status)
+    orig_errors = dict(REGISTRY.errors)
+    orig_metrics = dict(REGISTRY.metrics)
+
+    mock_model = MagicMock()
+    mock_tok = MagicMock()
+    qwen_loaded = []
+
+    def mock_load_qwen(*args, **kwargs):
+        qwen_loaded.append(True)
+        return mock_model, mock_tok, 1.25
+
+    monkeypatch.setattr(loaders, "check_ollama_running", lambda *args, **kwargs: False)
+    monkeypatch.setattr(loaders, "load_qwen_eager", mock_load_qwen)
+    monkeypatch.setattr(loaders, "load_omnivoice_eager", lambda *args, **kwargs: (MagicMock(), 1.0))
+    monkeypatch.setattr(loaders, "load_embedder_eager", lambda *args, **kwargs: (MagicMock(), 1.0))
+    monkeypatch.setattr(loaders, "load_stt_eager", lambda *args, **kwargs: MagicMock())
+
+    try:
+        loaders.load_all_models_eager("dummy_dir")
+        assert len(qwen_loaded) == 1, "load_qwen_eager should be called as fallback when Ollama is offline!"
+        assert REGISTRY.is_ready("llm") is True
+        assert REGISTRY.get("llm") == (mock_model, mock_tok)
+    finally:
+        REGISTRY._items = orig_items
+        REGISTRY.status = orig_status
+        REGISTRY.errors = orig_errors
+        REGISTRY.metrics = orig_metrics

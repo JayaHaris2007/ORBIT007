@@ -193,11 +193,16 @@ def ensure_model_loaded() -> None:
             return
         from runtime.models import REGISTRY
         if REGISTRY.is_ready("llm"):
-            model, tokenizer = REGISTRY.get("llm")
-            cuda_available = torch.cuda.is_available()
-            metrics = REGISTRY.metrics.get("llm", {})
-            load_seconds = metrics.get("load_time", 0.0)
-            return
+            obj = REGISTRY.get("llm")
+            if isinstance(obj, tuple):
+                model, tokenizer = obj
+                cuda_available = torch.cuda.is_available()
+                metrics = REGISTRY.metrics.get("llm", {})
+                load_seconds = metrics.get("load_time", 0.0)
+                return
+            elif obj == "ollama":
+                _ollama_check()
+                return
         if REGISTRY.status.get("llm") == "failed":
             raise RuntimeError(f"Qwen LLM failed to load during startup: {REGISTRY.errors.get('llm')}")
 
@@ -3996,7 +4001,11 @@ def generate_response(
     if LLM_BACKEND != "ollama" and (model is None or tokenizer is None):
         from runtime.models import REGISTRY
         if REGISTRY.is_ready("llm"):
-            model, tokenizer = REGISTRY.get("llm")
+            obj = REGISTRY.get("llm")
+            if isinstance(obj, tuple):
+                model, tokenizer = obj
+            elif obj == "ollama":
+                pass
         else:
             raise RuntimeError("The language model is currently unavailable.")
     if not prompt.strip():

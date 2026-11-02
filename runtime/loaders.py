@@ -171,6 +171,26 @@ def load_stt_eager() -> Any:
     return stt_engine
 
 
+def check_ollama_running(url: str = "http://127.0.0.1:11434", model_name: str = "qwen3.5:4b", timeout: float = 2.0) -> bool:
+    """Check if Ollama server is running and has the requested model available."""
+    import json
+    import urllib.request
+    try:
+        req = urllib.request.Request(f"{url.rstrip('/')}/api/tags", headers={"User-Agent": "spidey/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            models = [m.get("name", "") for m in data.get("models", [])]
+            return any(
+                m == model_name
+                or m == f"{model_name}:latest"
+                or (":" not in model_name and m.startswith(f"{model_name}:"))
+                or m.split(":")[0] == model_name.split(":")[0]
+                for m in models
+            )
+    except Exception:
+        return False
+
+
 def load_all_models_eager(
     qwen_dir: str,
     gpu_limit: str = "5GiB",
@@ -181,15 +201,54 @@ def load_all_models_eager(
     log.info("=== BEGINNING SINGLE-PROCESS EAGER MODEL INITIALIZATION ===")
     total_start = time.perf_counter()
 
-    # 1. Qwen LLM
-    try:
-        model, tokenizer, load_time = load_qwen_eager(
-            qwen_dir, gpu_limit=gpu_limit, cpu_limit=cpu_limit, generation_lock=generation_lock
+    # 1. LLM (Check if Ollama model is running; if not, load our local model)
+    ollama_url = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").strip()
+    ollama_model = os.environ.get("OLLAMA_MODEL", "qwen3.5:4b").strip()
+    configured_backend = os.environ.get("LLM_BACKEND", "").strip().lower()
+
+    force_transformers = configured_backend == "transformers"
+    ollama_active = False
+
+    if not force_transformers:
+        ollama_active = check_ollama_running(ollama_url, ollama_model)
+
+    if ollama_active:
+        log.info(
+            "Detected running Ollama at %s with model '%s'. Using Ollama backend (skipping local Qwen load).",
+            ollama_url,
+            ollama_model,
         )
-        REGISTRY.register("llm", (model, tokenizer), metrics={"load_time": load_time})
-    except Exception as err:
-        log.exception("Eager load failed for Qwen LLM: %s", err)
-        REGISTRY.fail("llm", err)
+        REGISTRY.register(
+            "llm",
+            "ollama",
+            metrics={"backend": "ollama", "model": ollama_model, "load_time": 0.0, "device": "ollama"},
+        )
+        try:
+            import app
+            app.LLM_BACKEND = "ollama"
+            app._ollama_ready = True
+        except Exception:
+            pass
+    else:
+        if configured_backend == "ollama":
+            log.warning(
+                "LLM_BACKEND is configured as 'ollama', but Ollama is not running at %s (or model '%s' not found). Falling back to local Qwen model.",
+                ollama_url,
+                ollama_model,
+            )
+        try:
+            model, tokenizer, load_time = load_qwen_eager(
+                qwen_dir, gpu_limit=gpu_limit, cpu_limit=cpu_limit, generation_lock=generation_lock
+            )
+            REGISTRY.register("llm", (model, tokenizer), metrics={"load_time": load_time})
+            try:
+                import app
+                app.LLM_BACKEND = "transformers"
+            except Exception:
+                pass
+        except Exception as err:
+            log.exception("Eager load failed for Qwen LLM: %s", err)
+            REGISTRY.fail("llm", err)
 
     # 2. OmniVoice TTS
     try:
