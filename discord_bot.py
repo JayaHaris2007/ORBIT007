@@ -20,7 +20,7 @@ from discord.ext import commands
 
 import app
 from voice.discord_voice import get_discord_voice_manager
-from db import create_reminder, list_reminders, save_message, get_recent_messages, init_db
+
 
 
 LOGGER = logging.getLogger("spidey.discord")
@@ -463,18 +463,6 @@ class SpideyBot(commands.Bot):
         chat_id = chat["id"]
         self.track_chat(chat_id, str(message.author.id))
 
-        # Check direct reminder creation intent via shared DB
-        tool_notice = app.parse_and_execute_reminder_intent(prompt)
-        if tool_notice:
-            save_message("user", prompt, session_id=f"discord_{chat_id}")
-            save_message("assistant", tool_notice, session_id=f"discord_{chat_id}")
-            app.memory_store.add_message(chat_id, "user", prompt)
-            app.memory_store.add_message(chat_id, "assistant", tool_notice)
-            await message.reply(tool_notice)
-            return
-
-        save_message("user", prompt, session_id=f"discord_{chat_id}")
-
         existing_reminders = {
             r["id"] for r in app.memory_store.list_reminders(active_only=True)
         }
@@ -483,27 +471,10 @@ class SpideyBot(commands.Bot):
             app.confirmation_mgr.check_and_handle, chat_id, prompt, app.agent_deps
         )
         if handled:
-            save_message("assistant", conf_reply, session_id=f"discord_{chat_id}")
             app.memory_store.add_message(chat_id, "user", prompt)
             app.memory_store.add_message(chat_id, "assistant", conf_reply)
             for chunk in _split_response(conf_reply):
                 await message.reply(chunk)
-            return
-
-        handled, conf_reply, _ = await asyncio.to_thread(
-            app.confirmation_mgr.check_and_handle, chat_id, prompt, app.agent_deps
-        )
-        if handled:
-            app.memory_store.add_message(chat_id, "user", prompt)
-            app.memory_store.add_message(chat_id, "assistant", conf_reply)
-            if text_channel is not None:
-                for chunk in _split_response(conf_reply):
-                    await text_channel.send(chunk)
-            voice_mgr = get_discord_voice_manager()
-            if voice_mgr.is_call_active(guild_id):
-                asyncio.create_task(
-                    voice_mgr.speak_text(guild_id, user.id, conf_reply)
-                )
             return
 
         try:
@@ -535,12 +506,6 @@ class SpideyBot(commands.Bot):
                     guild_id,
                     message.author.id,
                 )
-            for r in new_reminders:
-                try:
-                    create_reminder(r.get("text") or r.get("title", ""), r.get("run_at") or r.get("remind_at", ""))
-                except Exception:
-                    pass
-            save_message("assistant", response, session_id=f"discord_{chat_id}")
             app.memory_store.add_message(chat_id, "user", prompt)
             app.memory_store.add_message(chat_id, "assistant", response)
             for chunk in _split_response(response):
@@ -579,7 +544,6 @@ class SpideyBot(commands.Bot):
             return
 
         response = _clean_reply_text(response)
-        save_message("assistant", response, session_id=f"discord_{chat_id}")
         app.memory_store.add_message(chat_id, "assistant", response)
         for chunk in _split_response(response):
             await message.reply(chunk)

@@ -77,16 +77,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from db import (
-    init_db,
-    DB_PATH,
-    create_reminder,
-    list_reminders,
-    update_reminder_status,
-    delete_reminder,
-    save_message,
-    get_recent_messages,
-)
+
 
 BASE_DIR = Path(__file__).resolve().parent
 TTS_DIR = BASE_DIR / "TTS"
@@ -517,18 +508,7 @@ def _cancel_reminder_unified(reminder_id: str) -> bool:
     return ok
 
 
-def _migrate_legacy_reminders() -> int:
-    from db import list_reminders as legacy_list, update_reminder_status as legacy_done
-    moved = 0
-    for r in legacy_list(include_completed=False):
-        try:
-            _create_reminder_unified(r["title"], r["remind_at"])
-        except Exception as err:
-            logging.getLogger("orbit007").warning("legacy reminder %s skipped: %s", r.get("id"), err)
-            continue
-        legacy_done(r["id"], True)  # never migrate twice
-        moved += 1
-    return moved
+
 
 
 def _parse_reminder_time(value: str) -> datetime | None:
@@ -3956,7 +3936,6 @@ async def lifespan(_: FastAPI):
     global MAIN_LOOP
     MAIN_LOOP = asyncio.get_running_loop()
     _cleanup_tts()
-    init_db()
     from runtime.guard import acquire_model_process_lock, release_model_process_lock
     acquire_model_process_lock()
     try:
@@ -3970,12 +3949,7 @@ async def lifespan(_: FastAPI):
         # Calling ensure_model_loaded() here caused a second Qwen load when
         # Ollama was configured but not yet reachable at lifespan start.
         _restore_reminders(provider="local")
-        try:
-            migrated_count = _migrate_legacy_reminders()
-            if migrated_count:
-                logging.getLogger("orbit007").info("Migrated %d legacy reminders to MemoryStore", migrated_count)
-        except Exception as e:
-            logging.getLogger("orbit007").warning("Legacy reminder migration error: %s", e)
+
         init_learning_module("local")
         purge_voice_tmp()
 
@@ -4091,11 +4065,11 @@ async def health():
         "status": "ok",
         "llm_backend": "ollama",
         "llm_reachable": reachable,
-        "db_connected": DB_PATH.exists(),
-        "db_path": str(DB_PATH),
+        "db_connected": DATABASE_PATH.exists(),
+        "db_path": str(DATABASE_PATH),
         "api_version": "spidey-local-2026-11",
         "model": OLLAMA_MODEL,
-        "database": str(DB_PATH),
+        "database": str(DATABASE_PATH),
         "semantic_memory": os.environ.get("AI_ENABLE_SEMANTIC_MEMORY", "1") != "0",
         "scheduler_running": reminder_scheduler.running if "reminder_scheduler" in globals() else False,
         "scheduled_jobs": len(reminder_scheduler.get_jobs()) if "reminder_scheduler" in globals() and reminder_scheduler.running else 0,
@@ -4536,31 +4510,9 @@ class ReminderUpdatePayload(BaseModel):
     remind_at: Optional[str] = None
     run_at: Optional[str] = None
 
-# legacy, unused
-def parse_and_execute_reminder_intent(user_text: str) -> Optional[str]:
-    """Fallback intent parser if the LLM does not emit structured tool calls."""
-    match = re.search(
-        r"remind me to (.+?) (?:at|on|in) (.+)", user_text, re.IGNORECASE
-    )
-    if match:
-        title = match.group(1).strip()
-        remind_at = match.group(2).strip()
-        created = create_reminder(title=title, remind_at=remind_at)
-        return f"Reminder set: '{created['title']}' for {created['remind_at']}."
-    return None
 
-def run_existing_llm(user_message: str, history: list[dict[str, Any]], active_reminders: list[dict[str, Any]]) -> str:
-    """Run existing LLM inference with tool calling support without blocking FastAPI."""
-    try:
-        memories = _memories_for_prompt(user_message) or []
-        res = respond_with_tools(user_message, DEFAULT_CHAT_ID, history, memories, channel="web")
-        return res.reply
-    except Exception as exc:
-        logging.getLogger("orbit007").warning("LLM inference failed: %s", exc)
-        if active_reminders and any(k in user_message.lower() for k in ["remind", "task", "list", "what"]):
-            items = ", ".join(f"'{r['title']}' for {r['remind_at']}" for r in active_reminders)
-            return f"You currently have these active reminders: {items}."
-        return f"Acknowledged: '{user_message}'. How else can I assist with your reminders and schedule?"
+
+
 
 def run_existing_tts(text: str, output_path: str) -> None:
     """Synthesize speech into WAV audio file."""
@@ -4655,11 +4607,7 @@ def _cleanup_tts(max_age_s: int = 600) -> None:
             pass
 
 
-def _handle_llm_tool_calls(
-    llm_reply: str, user_message: str, chat_id: str | None = None
-) -> str:
-    """Legacy tool call compatibility: clean any stray tool_call XML tags."""
-    return re.sub(r"<tool_call>.*?</tool_call>", "", llm_reply, flags=re.DOTALL).strip()
+
 
 
 async def process_agent_turn(
@@ -4668,12 +4616,12 @@ async def process_agent_turn(
     user_message = user_message.strip()
     target_chat = chat_id or session_id or DEFAULT_CHAT_ID
     _ensure_chat_exists(target_chat)
-    save_message("user", user_message, session_id=session_id)
+    memory_store.add_message(target_chat, "user", user_message)
 
     # 1. Pending confirmation check
     handled, conf_reply, conf_actions = confirmation_mgr.check_and_handle(target_chat, user_message, agent_deps)
     if handled:
-        save_message("assistant", conf_reply, session_id=session_id)
+        memory_store.add_message(target_chat, "assistant", conf_reply)
         audio_url = await generate_tts_url(conf_reply)
         _cleanup_tts()
         return {
@@ -4681,7 +4629,7 @@ async def process_agent_turn(
             "text": conf_reply,
             "audio_url": audio_url,
             "reminders": _live_reminders(),
-            "history": get_recent_messages(session_id=session_id, limit=20),
+            "history": memory_store.get_messages(target_chat)[-20:],
             "ui_actions": conf_actions,
         }
 
@@ -4700,7 +4648,7 @@ async def process_agent_turn(
 
     # 3. Route to native tool loop
     if reply_text is None:
-        history = get_recent_messages(session_id=session_id, limit=10)
+        history = memory_store.get_messages(target_chat)[-10:]
         memories = _memories_for_prompt(user_message)
         try:
             agent_result = await asyncio.to_thread(
@@ -4717,7 +4665,7 @@ async def process_agent_turn(
             logging.getLogger("orbit007").warning("Agent turn failed: %s", exc)
             reply_text = "I'm having trouble connecting to my local language model right now. Please make sure Ollama is running (`ollama serve`)."
 
-    save_message("assistant", reply_text, session_id=session_id)
+    memory_store.add_message(target_chat, "assistant", reply_text)
 
     # 4. Audio generation: per-reply unique audio file
     audio_url = await generate_tts_url(reply_text)
@@ -4728,7 +4676,7 @@ async def process_agent_turn(
         "text": reply_text,
         "audio_url": audio_url,
         "reminders": _live_reminders(),
-        "history": get_recent_messages(session_id=session_id, limit=20),
+        "history": memory_store.get_messages(target_chat)[-20:],
         "ui_actions": ui_actions,
     }
 
@@ -4827,7 +4775,8 @@ async def api_delete_reminder(reminder_id: str):
 
 @app.get("/api/history")
 async def api_get_history(session_id: str = "default"):
-    return {"messages": get_recent_messages(session_id=session_id, limit=50)}
+    _ensure_chat_exists(session_id)
+    return {"messages": memory_store.get_messages(session_id)[-50:]}
 
 @app.post("/api/chat")
 async def api_chat(payload: ChatPayload):
@@ -4846,7 +4795,7 @@ async def websocket_agent_endpoint(websocket: WebSocket):
         await websocket.send_json({
             "type": "connected",
             "reminders": _live_reminders(),
-            "history": get_recent_messages(session_id=current_chat_id, limit=20),
+            "history": memory_store.get_messages(current_chat_id)[-20:],
             "chat_id": current_chat_id,
         })
         audio_buffer = bytearray()
@@ -4907,7 +4856,7 @@ async def websocket_agent_endpoint(websocket: WebSocket):
                     await websocket.send_json({
                         "type": "chat_set",
                         "chat_id": current_chat_id,
-                        "history": get_recent_messages(session_id=current_chat_id, limit=20),
+                        "history": memory_store.get_messages(current_chat_id)[-20:],
                     })
                     continue
                 elif msg_type == "end_audio":

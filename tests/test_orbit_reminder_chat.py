@@ -8,7 +8,6 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 import app
-import db
 from memory import LOCAL_TIMEZONE, MemoryStore
 
 
