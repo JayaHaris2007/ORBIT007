@@ -975,9 +975,11 @@ def main() -> None:
         import urllib.request
         req = urllib.request.urlopen("http://127.0.0.1:8000/api/health", timeout=1.5)
         if req.status == 200:
-            print("\n[INFO] S.P.I.D.E.Y server is already running on port 8000 with the in-process Discord bot.")
-            print("To avoid duplicate model loading in VRAM, the bot runs inside the server process.")
-            print("No separate discord_bot.py process is needed. Exiting.\n")
+            LOGGER.info(
+                "S.P.I.D.E.Y server is already running on port 8000 with the in-process Discord bot. "
+                "To avoid duplicate model loading in VRAM, the bot runs inside the server process. "
+                "No separate discord_bot.py process is needed. Exiting."
+            )
             return
     except Exception as err:
         LOGGER.debug("Server health check bypassed: %s", err)

@@ -1,4 +1,5 @@
 import logging
+from logging.handlers import RotatingFileHandler
 import secrets
 import os
 import sys
@@ -80,6 +81,39 @@ from fastapi.staticfiles import StaticFiles
 
 
 BASE_DIR = Path(__file__).resolve().parent
+LOGS_DIR = BASE_DIR / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOGS_DIR / "spidey.log"
+
+def configure_logging(level: int = logging.INFO) -> None:
+    root = logging.getLogger()
+    if getattr(root, "_spidey_configured", False):
+        return
+    root.setLevel(level)
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    console_handler.setLevel(level)
+
+    file_handler = RotatingFileHandler(
+        str(LOG_FILE),
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(level)
+
+    root.addHandler(console_handler)
+    root.addHandler(file_handler)
+    root._spidey_configured = True
+
+configure_logging()
+LOGGER = logging.getLogger("spidey")
+
 TTS_DIR = BASE_DIR / "TTS"
 TTS_DIR.mkdir(parents=True, exist_ok=True)
 from memory import LOCAL_TIMEZONE, MAX_RETRIEVED_MEMORIES, MemoryStore
@@ -350,7 +384,7 @@ def _recommend_next_task(
         if not content:
             raise ValueError("Empty task recommendation.")
     except Exception as error:
-        print(f"Task recommendation generation failed: {error}")
+        LOGGER.warning("Task recommendation generation failed: %s", error)
         if not tasks:
             content = (
                 f"You've completed \"{completed_task_title}\" and cleared all "
@@ -386,7 +420,7 @@ def _schedule_reminder(reminder: dict[str, Any]) -> None:
             settings={"RETURN_AS_TIMEZONE_AWARE": True, "TIMEZONE": "Asia/Kolkata"},
         )
     if run_at is None:
-        print(f"Skipping reminder {reminder['id']}: invalid run time.")
+        LOGGER.warning("Skipping reminder %s: invalid run time.", reminder["id"])
         return
     recurrence = (reminder.get("recurrence") or "").lower().strip()
     if recurrence:
@@ -411,7 +445,7 @@ def _schedule_reminder(reminder: dict[str, Any]) -> None:
         if now - run_at > timedelta(minutes=30):
             memory_store.cancel_reminder(reminder["id"])
             return
-        print(f"Delivering missed reminder {reminder['id']}.")
+        LOGGER.info("Delivering missed reminder %s.", reminder["id"])
         run_at = now + timedelta(seconds=5)
     reminder_scheduler.add_job(
         _run_reminder,
@@ -444,7 +478,7 @@ def _restore_reminders(provider: str = "local") -> None:
         try:
             _schedule_reminder(reminder)
         except Exception as error:
-            print(f"Skipping reminder {reminder['id']}: {error}")
+            LOGGER.warning("Skipping reminder %s: %s", reminder["id"], error)
     if not reminder_scheduler.running:
         reminder_scheduler.start()
 
@@ -890,7 +924,7 @@ def _web_search_reply(query: str) -> tuple[str, str]:
     try:
         sources = web_search(query, max_results=5, search_depth="basic")
     except SearchNotConfigured as error:
-        print(f"Web search unavailable: {error}")
+        LOGGER.warning("Web search unavailable: %s", error)
         return (
             "I can search the web, but the search key is not set yet. Add "
             "TAVILY_API_KEY to the .env file next to app.py, restart the server, "
@@ -1559,7 +1593,7 @@ def _learning_suggest_for_task(task_id: int) -> None:
             llm=_fallback_llm_for_learning,
         )
     except Exception as error:  # pragma: no cover - defensive
-        print(f"Learning link suggestion skipped: {error}")
+        LOGGER.debug("Learning link suggestion skipped: %s", error)
 
 
 def _fallback_llm_for_learning(title: str, topics) -> str | None:
@@ -1578,7 +1612,7 @@ def _fallback_llm_for_learning(title: str, topics) -> str | None:
     try:
         reply = generate_response(prompt, 16)
     except Exception as error:  # pragma: no cover - defensive
-        print(f"Learning LLM fallback skipped: {error}")
+        LOGGER.debug("Learning LLM fallback skipped: %s", error)
         return None
     return reply or None
 
@@ -1590,7 +1624,7 @@ def _learning_on_task_completed(task_id: int) -> None:
     try:
         learning_progress.on_task_completed_links(task_id)
     except Exception as error:  # pragma: no cover - defensive
-        print(f"Learning completion rule skipped: {error}")
+        LOGGER.debug("Learning completion rule skipped: %s", error)
 
 
 def _run_learning_hook(job) -> None:
@@ -1619,7 +1653,7 @@ def _weekly_learning_nudge(provider: str = "local") -> None:
             recently_sent=memory_store.has_recent_weekly_nudge,
         )
     except Exception as error:  # pragma: no cover - defensive
-        print(f"Weekly learning nudge skipped: {error}")
+        LOGGER.debug("Weekly learning nudge skipped: %s", error)
 
 
 def _schedule_weekly_learning_nudge(provider: str = "local") -> None:
@@ -1635,7 +1669,7 @@ def _schedule_weekly_learning_nudge(provider: str = "local") -> None:
             replace_existing=True,
         )
     except Exception as error:  # pragma: no cover - defensive
-        print(f"Weekly learning nudge not scheduled: {error}")
+        LOGGER.debug("Weekly learning nudge not scheduled: %s", error)
 
 
 def init_learning_module(provider: str = "local") -> bool:
@@ -1646,7 +1680,7 @@ def init_learning_module(provider: str = "local") -> bool:
         _schedule_weekly_learning_nudge(provider)
         return learning_schema.is_initialized()
     except Exception as error:  # pragma: no cover - defensive
-        print(f"Learning module init skipped: {error}")
+        LOGGER.debug("Learning module init skipped: %s", error)
         return False
 
 
@@ -3897,7 +3931,7 @@ def _generate_ollama(messages: list[dict[str, str]], max_new_tokens: int) -> str
         )
     else:
         timing_str = f"[generation {elapsed_seconds:.2f}s]"
-    print(timing_str)
+    LOGGER.info("%s", timing_str)
     logging.getLogger("orbit007").info(timing_str)
 
     return text
@@ -3990,7 +4024,7 @@ async def lifespan(_: FastAPI):
                 from discord_bot import start_discord_bot_in_process
                 await start_discord_bot_in_process(discord_token)
             except Exception as err:
-                print(f"Warning: Failed to start in-process Discord bot: {err}")
+                LOGGER.warning("Failed to start in-process Discord bot: %s", err)
 
         yield
     finally:
@@ -4050,7 +4084,7 @@ app.mount("/tts", StaticFiles(directory=str(TTS_DIR)), name="tts")
 
 @app.exception_handler(Exception)
 async def handle_unexpected_error(request: Request, error: Exception):
-    print(f"Unhandled API error: {error}")
+    LOGGER.exception("Unhandled API error: %s", error)
     return JSONResponse(
         status_code=500,
         content={"error": "The backend could not complete that request."},
@@ -4282,7 +4316,7 @@ async def generate(payload: dict[str, Any] = Body(...)):
 
         # 2. Rules-first command handling
         command = _handle_local_command(prompt, chat_id)
-        print(f"[route] {'local:' + command[1] if command else 'tools/llm'} <- {prompt!r}")
+        LOGGER.info("[route] %s <- %r", "local:" + command[1] if command else "tools/llm", prompt)
         if command is not None:
             response, provider = command
             memory_store.add_message(chat_id, "user", prompt.strip())
@@ -5049,14 +5083,11 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    configure_logging(level=logging.INFO)
     args = parse_arguments()
     if args.server:
         if args.host == "0.0.0.0" and not os.environ.get("ORBIT_API_TOKEN", "").strip():
-            print(
+            LOGGER.warning(
                 "[SECURITY WARNING] Server is binding to 0.0.0.0 with no ORBIT_API_TOKEN set! "
                 "Any machine on your network can access this assistant."
             )

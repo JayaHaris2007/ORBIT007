@@ -873,7 +873,7 @@ class MemoryStore:
         except Exception:
             pass
         if not self._embedding_warning_printed:
-            print("Semantic memory model unavailable; using keyword retrieval.")
+            LOGGER.info("Semantic memory model unavailable; using keyword retrieval.")
             self._embedding_warning_printed = True
         return None
 
