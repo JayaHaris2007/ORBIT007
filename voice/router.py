@@ -178,6 +178,8 @@ def stop_voice_turn(payload: dict[str, Any] | None = Body(default=None)) -> dict
         session_id = str(payload["session_id"])
     voice_session = session.get_voice_session(session_id)
     voice_session.reset()
+    if session_id == "default":
+        session.reset_all_sessions()
     return {"status": "stopped"}
 
 

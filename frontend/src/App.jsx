@@ -43,6 +43,9 @@ function App() {
                         <Route path="/learning" element={<AppLayout><ErrorBoundary><Learning /></ErrorBoundary></AppLayout>} />
                         <Route path="/analytics" element={<AppLayout><Analytics /></AppLayout>} />
                         <Route path="/settings" element={<AppLayout><Settings /></AppLayout>} />
+                        <Route path="/tasks" element={<Navigate to="/todos" replace />} />
+                        <Route path="/memories" element={<Navigate to="/reminders" replace />} />
+                        <Route path="/notes" element={<Navigate to="/reminders" replace />} />
                         <Route path="*" element={<Navigate to="/dashboard" replace />} />
                     </Routes>
                 </Router>

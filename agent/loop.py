@@ -74,6 +74,7 @@ def _ollama_chat_request(
     tools: list[dict[str, Any]] | None = None,
     format_schema: dict[str, Any] | None = None,
     timeout: float = 60.0,
+    max_tokens: int = 384,
 ) -> dict[str, Any]:
     """Execute a single synchronous chat completion request against Ollama."""
     url = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/") + "/api/chat"
@@ -92,7 +93,7 @@ def _ollama_chat_request(
         "keep_alive": keep_alive,
         "options": {
             "temperature": 0,
-            "num_predict": 384,
+            "num_predict": max_tokens or 384,
             "num_ctx": num_ctx,
         },
     }
@@ -185,8 +186,13 @@ def run_agent_loop(
                 # Remove message at index 1
                 messages.pop(1)
 
+        # Compute dynamic reply token budget
+        max_tokens = deps.token_budget(prompt) if hasattr(deps, "token_budget") else 384
+        if channel == "voice":
+            max_tokens = min(max_tokens, 128)
+
         try:
-            resp_data = _ollama_chat_request(messages, tools=ollama_tools, timeout=TURN_TIMEOUT_SECONDS)
+            resp_data = _ollama_chat_request(messages, tools=ollama_tools, timeout=TURN_TIMEOUT_SECONDS, max_tokens=max_tokens)
         except RuntimeError:
             raise
 

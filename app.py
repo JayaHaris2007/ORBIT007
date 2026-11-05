@@ -189,7 +189,7 @@ def ensure_model_loaded() -> None:
     _ollama_check()
 
 
-generation_lock = threading.Lock()
+generation_lock = threading.RLock()
 memory_store = MemoryStore(DATABASE_PATH)
 reminder_scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
 
@@ -302,7 +302,7 @@ def _recommend_next_task(
     if not chat_id:
         return
     tasks = memory_store.list_tasks(include_completed=False)
-    current_time = datetime.now().astimezone().strftime("%d %B %Y, %I:%M %p")
+    current_time = datetime.now(LOCAL_TIMEZONE).strftime("%d %B %Y, %I:%M %p")
 
     if not tasks:
         if completed_task_title:
@@ -400,7 +400,7 @@ def _schedule_reminder(reminder: dict[str, Any]) -> None:
         amount, unit = int(match.group(1) or 1), match.group(2)
         reminder_scheduler.add_job(
             _run_reminder,
-            IntervalTrigger(**{f"{unit}s": amount}, timezone="Asia/Kolkata"),
+            IntervalTrigger(**{f"{unit}s": amount}, start_date=run_at, timezone="Asia/Kolkata"),
             args=[reminder["id"]],
             id=reminder["id"],
             replace_existing=True,
@@ -512,6 +512,14 @@ def _cancel_reminder_unified(reminder_id: str) -> bool:
 
 
 def _parse_reminder_time(value: str) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(value.strip())
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=LOCAL_TIMEZONE)
+        return dt.astimezone(LOCAL_TIMEZONE)
+    except (ValueError, TypeError):
+        pass
+
     rel_match = re.fullmatch(
         r"in\s+(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)",
         value.strip(),
@@ -779,6 +787,8 @@ def _normalize_command(prompt: str) -> str:
 def _reminder_clarification(prompt: str) -> str | None:
     """Ask for the missing detail instead of letting the LLM invent a reminder."""
     normalized = _normalize_command(prompt)
+    if re.search(r"^remind\s+me\s+(?:what|why|who|how|where|when|which|whether|if)\b", normalized, re.IGNORECASE):
+        return None
     create_pattern = rf"^(?:{_REMINDER_CREATE_PATTERN}|remind\s+me)\b"
     if not re.match(create_pattern, normalized, re.IGNORECASE):
         return None
@@ -888,10 +898,16 @@ def _web_search_reply(query: str) -> tuple[str, str]:
             "web-search-unconfigured",
         )
     except SearchFailed as error:
-        print(f"Web search failed for {query!r}: {error}")
+        logging.getLogger("orbit007").warning("Web search failed for %r: %s", query, error)
         return (
             "I reached for the web but the search provider didn't answer. "
             "Give it another try in a moment.",
+            "web-search-failed",
+        )
+    except Exception as error:
+        logging.getLogger("orbit007").warning("Web search error for %r: %s", query, error)
+        return (
+            "Web search is currently unavailable or timed out. Please try again in a moment.",
             "web-search-failed",
         )
     if not sources:
@@ -2126,10 +2142,27 @@ def _assistant_intro_answer(prompt: str) -> str | None:
 
 _PAGE_BY_PROVIDER = {
     "local-habit-manager": "habits",
-    "local-task-manager": "tasks",
+    "local-task-manager": "todos",
     "local-scheduler": "reminders",
     "local-learning": "learning",
+    "local-memory": "reminders",
 }
+
+_PAGE_ROUTES = {
+    "tasks": "/todos",
+    "todos": "/todos",
+    "habits": "/habits",
+    "reminders": "/reminders",
+    "memories": "/reminders",
+    "notes": "/reminders",
+    "dashboard": "/dashboard",
+    "learning": "/learning",
+    "analytics": "/analytics",
+    "settings": "/settings",
+}
+
+def _route_for_page(page: str) -> str:
+    return _PAGE_ROUTES.get(page, f"/{page}")
 
 _PAGE_ALIASES = {
     "tasks": ("task", "tasks", "todo", "todos", "to-do", "to-dos", "to do", "to dos"),
@@ -3677,14 +3710,6 @@ def _handle_local_command(prompt: str, chat_id: str) -> tuple[str, str] | None:
         return _web_search_reply(web_query)
 
     normalized = _normalize_command(prompt)
-    if _ACTION_WITHOUT_HANDLER.search(normalized) and not _is_advice_question(
-        normalized.lower()
-    ):
-        return (
-            "I couldn't parse that as a command, so nothing was changed. "
-            "Try 'add habit exercise' or 'complete task explore AI basics'.",
-            "local-help",
-        )
     return None
 
 
@@ -3952,6 +3977,12 @@ async def lifespan(_: FastAPI):
 
         init_learning_module("local")
         purge_voice_tmp()
+        reminder_scheduler.add_job(
+            _cleanup_temp_audio,
+            IntervalTrigger(minutes=15, timezone="Asia/Kolkata"),
+            id="spidey-temp-audio-cleanup",
+            replace_existing=True,
+        )
 
         discord_token = os.environ.get("AI_DISCORD_TOKEN", "").strip()
         if discord_token:
@@ -4153,33 +4184,46 @@ def respond_with_tools(
     history = history or []
     memories = memories or []
 
+    # Resolve short follow-ups (e.g. "name one", "why?") using previous context
+    prompt = resolve_short_follow_up(prompt, history)
+
     # If generate_response was monkeypatched in tests, bypass agent loop and call the mock
     is_mocked = (generate_response is not _ORIGINAL_GENERATE_RESPONSE) or hasattr(generate_response, "assert_called")
 
-    if orbit_tools != "0" and not is_mocked:
+    with generation_lock:
         try:
-            return run_agent_loop(
-                prompt=prompt,
-                chat_id=chat_id,
-                history=history,
-                memories=memories,
-                channel=channel,
-                deps=agent_deps,
-                confirm_mgr=confirmation_mgr,
-            )
-        except Exception as exc:
-            logging.getLogger("orbit007").warning("Agent loop error, falling back to plain chat: %s", exc)
+            if orbit_tools != "0" and not is_mocked:
+                try:
+                    return run_agent_loop(
+                        prompt=prompt,
+                        chat_id=chat_id,
+                        history=history,
+                        memories=memories,
+                        channel=channel,
+                        deps=agent_deps,
+                        confirm_mgr=confirmation_mgr,
+                    )
+                except Exception as exc:
+                    logging.getLogger("orbit007").warning("Agent loop error, falling back to plain chat: %s", exc)
 
-    tokens = _token_budget(prompt)
-    if channel == "voice":
-        tokens = min(tokens, 128)
-    reply = generate_response(
-        prompt=prompt,
-        max_new_tokens=tokens,
-        messages=history,
-        memories=memories,
-    )
-    return AgentResult(reply=reply.strip(), ui_actions=[], provider="ollama")
+            tokens = _token_budget(prompt)
+            if channel == "voice":
+                tokens = min(tokens, 128)
+            reply = generate_response(
+                prompt=prompt,
+                max_new_tokens=tokens,
+                messages=history,
+                memories=memories,
+            )
+            return AgentResult(reply=reply.strip(), ui_actions=[], provider="ollama")
+        except Exception:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            raise
 
 
 @app.post("/generate")
@@ -4244,7 +4288,9 @@ async def generate(payload: dict[str, Any] = Body(...)):
             memory_store.add_message(chat_id, "user", prompt.strip())
             memory_store.add_message(chat_id, "assistant", response)
             nav = _page_for_provider(provider)
-            ui_actions = [{"type": "navigate", "page": nav, "route": f"/{nav}"}] if nav else []
+            ui_actions = [{"type": "navigate", "page": nav, "route": _route_for_page(nav)}] if nav else []
+            if provider == "local-memory":
+                ui_actions.append({"type": "refresh", "sections": ["memories"]})
             return {
                 "response": response,
                 "chat_id": chat_id,
@@ -4606,6 +4652,23 @@ def _cleanup_tts(max_age_s: int = 600) -> None:
         except OSError:
             pass
 
+def _cleanup_temp_audio() -> None:
+    _cleanup_tts(max_age_s=600)
+    try:
+        from voice.config import TMP_DIR
+        if TMP_DIR.exists():
+            cutoff = time.time() - 600
+            for item in TMP_DIR.iterdir():
+                if item.name in {".gitignore", ".gitkeep"}:
+                    continue
+                try:
+                    if item.is_file() and item.stat().st_mtime < cutoff:
+                        item.unlink(missing_ok=True)
+                except OSError:
+                    pass
+    except Exception as exc:
+        logging.getLogger("orbit007").warning("Temp audio cleanup error: %s", exc)
+
 
 
 
@@ -4613,7 +4676,11 @@ def _cleanup_tts(max_age_s: int = 600) -> None:
 async def process_agent_turn(
     user_message: str, session_id: str = "default", chat_id: str | None = None
 ) -> dict:
-    user_message = user_message.strip()
+    user_message = (user_message or "").strip()
+    if not user_message:
+        raise ValueError("Message cannot be empty.")
+    if len(user_message) > MAX_PROMPT_CHARS:
+        raise ValueError(f"Message is limited to {MAX_PROMPT_CHARS} characters.")
     target_chat = chat_id or session_id or DEFAULT_CHAT_ID
     _ensure_chat_exists(target_chat)
     memory_store.add_message(target_chat, "user", user_message)
@@ -4642,7 +4709,10 @@ async def process_agent_turn(
             reply_text = cmd_result[0]
             nav = _page_for_provider(cmd_result[1])
             if nav:
-                ui_actions.append({"type": "navigate", "page": nav, "route": f"/{nav}"})
+                route = _route_for_page(nav)
+                ui_actions.append({"type": "navigate", "page": nav, "route": route})
+            if cmd_result[1] == "local-memory":
+                ui_actions.append({"type": "refresh", "sections": ["memories"]})
     except Exception:
         logging.getLogger("orbit007").exception("Local command handling failed for %r", user_message)
 

@@ -167,6 +167,14 @@ class MemoryStore:
                   );
                 """
             )
+            session_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(external_sessions)")
+            }
+            if "last_notification_id" not in session_columns:
+                connection.execute(
+                    "ALTER TABLE external_sessions ADD COLUMN last_notification_id INTEGER NOT NULL DEFAULT 0"
+                )
             reminder_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(reminders)")
@@ -295,6 +303,21 @@ class MemoryStore:
                 (provider, external_user_id, chat["id"], now, now),
             )
         return chat
+
+    def get_external_last_notification_id(self, chat_id: str) -> int:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT last_notification_id FROM external_sessions WHERE conversation_id = ?",
+                (chat_id,),
+            ).fetchone()
+        return int(row["last_notification_id"]) if row and row["last_notification_id"] is not None else 0
+
+    def set_external_last_notification_id(self, chat_id: str, last_id: int) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE external_sessions SET last_notification_id = ? WHERE conversation_id = ?",
+                (last_id, chat_id),
+            )
 
     def get_external_session(self, chat_id: str) -> dict[str, Any] | None:
         with self.connect() as connection:

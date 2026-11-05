@@ -306,7 +306,11 @@ def suggest_links_for_task(
             except Exception:  # pragma: no cover - model is best-effort
                 matches = []
         created = []
+        seen_topics = set()
         for topic_id, confidence, source in matches:
+            if topic_id in seen_topics:
+                continue
+            seen_topics.add(topic_id)
             link_id = _insert_suggested_link(
                 connection, task_id, topic_id, confidence, source
             )
