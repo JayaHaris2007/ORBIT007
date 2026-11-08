@@ -40,3 +40,4 @@ tavily-python
 # Discord voice & bot integrations
 discord.py[voice]
 discord-ext-voice-recv
+davey>=0.2.0

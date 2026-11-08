@@ -6,15 +6,12 @@ echo         Starting S.P.I.D.E.Y / ORBIT007 Environment
 echo ========================================================
 
 :: 0. Activate the Python environment
-if exist ".venv314\Scripts\activate.bat" (
-    echo [INFO] Activating virtual environment: .venv314
-    call ".venv314\Scripts\activate.bat"
+if exist ".venv\Scripts\activate.bat" (
+    echo [INFO] Activating virtual environment: .venv
+    call ".venv\Scripts\activate.bat"
 ) else if exist "venv\Scripts\activate.bat" (
     echo [INFO] Activating virtual environment: venv
     call "venv\Scripts\activate.bat"
-) else if exist ".venv\Scripts\activate.bat" (
-    echo [INFO] Activating virtual environment: .venv
-    call ".venv\Scripts\activate.bat"
 ) else (
     echo [WARNING] No venv found! Running with system Python.
 )
@@ -37,12 +34,10 @@ if %ERRORLEVEL% EQU 0 (
 
 :: 2. Start FastAPI Backend (Database, Agent WebSocket, REST API on Port 8000)
 echo [2/3] Starting Python Backend with activated venv: Port 8000
-if exist ".venv314\Scripts\activate.bat" (
-    start "Spidey Backend" cmd /k "call .venv314\Scripts\activate.bat && set TTS_BACKEND=phonon && set SPIDEY_ALLOW_HUB=1 && python app.py --server"
+if exist ".venv\Scripts\activate.bat" (
+    start "Spidey Backend" cmd /k "call .venv\Scripts\activate.bat && set TTS_BACKEND=phonon && set SPIDEY_ALLOW_HUB=1 && python app.py --server"
 ) else if exist "venv\Scripts\activate.bat" (
     start "Spidey Backend" cmd /k "call venv\Scripts\activate.bat && set TTS_BACKEND=phonon && set SPIDEY_ALLOW_HUB=1 && python app.py --server"
-) else if exist ".venv\Scripts\activate.bat" (
-    start "Spidey Backend" cmd /k "call .venv\Scripts\activate.bat && set TTS_BACKEND=phonon && set SPIDEY_ALLOW_HUB=1 && python app.py --server"
 ) else (
     start "Spidey Backend" cmd /k "set TTS_BACKEND=phonon && set SPIDEY_ALLOW_HUB=1 && python app.py --server"
 )
