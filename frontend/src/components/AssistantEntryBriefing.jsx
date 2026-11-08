@@ -40,6 +40,7 @@ const STEP_ICONS = {
 /**
  * Helper to trigger S.P.I.D.E.Y. sidebar chat with a specific prompt.
  */
+// eslint-disable-next-line react-refresh/only-export-components
 export function triggerAssistantPrompt(promptText) {
     if (!promptText) return;
     window.dispatchEvent(
@@ -57,9 +58,16 @@ function useBriefingSpeech(textToSpeak) {
     const audioQueueRef = useRef(null);
     const abortControllerRef = useRef(null);
 
-    if (!audioQueueRef.current && typeof window !== 'undefined') {
-        audioQueueRef.current = new AudioQueue();
-    }
+    useEffect(() => {
+        const queue = new AudioQueue();
+        audioQueueRef.current = queue;
+        queue.onPlay = () => setSpeaking(true);
+        queue.onIdle = () => setSpeaking(false);
+        return () => {
+            queue.stop();
+            audioQueueRef.current = null;
+        };
+    }, []);
 
     const fallbackBrowserSpeech = useCallback((text) => {
         if (typeof window === 'undefined' || !('speechSynthesis' in window)) {
@@ -90,7 +98,11 @@ function useBriefingSpeech(textToSpeak) {
         }
         stopVoiceTurn().catch(() => {});
         if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-            window.speechSynthesis.cancel();
+            try {
+                window.speechSynthesis.cancel();
+            } catch {
+                // ignore
+            }
         }
         setSpeaking(false);
     }, []);
@@ -120,10 +132,11 @@ function useBriefingSpeech(textToSpeak) {
         const controller = new AbortController();
         abortControllerRef.current = controller;
         const queue = audioQueueRef.current;
+        if (!queue) {
+            fallbackBrowserSpeech(textToSpeak);
+            return;
+        }
         const currentEpoch = queue.epoch;
-
-        queue.onPlay = () => setSpeaking(true);
-        queue.onIdle = () => setSpeaking(false);
         setSpeaking(true);
 
         try {
@@ -141,7 +154,7 @@ function useBriefingSpeech(textToSpeak) {
             }
         } catch (err) {
             if (controller.signal.aborted) return;
-            console.warn('OmniVoice TTS playback error, falling back to Web Speech:', err);
+            console.warn('Neural TTS playback error, falling back to Web Speech:', err);
             fallbackBrowserSpeech(textToSpeak);
         }
     }, [speaking, textToSpeak, stopSpeech, fallbackBrowserSpeech]);

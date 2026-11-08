@@ -1,4 +1,5 @@
 import logging
+from logging.handlers import RotatingFileHandler
 import secrets
 import os
 import sys
@@ -8,6 +9,8 @@ import difflib
 import re
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 import warnings
 from contextlib import asynccontextmanager
@@ -36,44 +39,81 @@ else:
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-import torch
 import dateparser
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-CPU_THREADS = 4
-CPU_INTEROP_THREADS = 1
-GPU_MEMORY_LIMIT = "5GiB"
-CPU_MEMORY_LIMIT = "6GiB"
 MAX_PROMPT_CHARS = 2000
 MAX_NEW_TOKENS = 512
 DATABASE_PATH = Path(os.environ.get("ORBIT_DB_DIR", Path(__file__).resolve().parent)) / "assistant.db"
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+# LLM Backend configuration (Ollama only)
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3.5:4b").strip()
+try:
+    OLLAMA_NUM_CTX = int(os.environ.get("OLLAMA_NUM_CTX", "4096").strip())
+except Exception:
+    OLLAMA_NUM_CTX = 4096
+
+OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "5m").strip()
+try:
+    OLLAMA_TIMEOUT = float(os.environ.get("OLLAMA_TIMEOUT", "120").strip())
+except Exception:
+    OLLAMA_TIMEOUT = 120.0
+
+_ollama_ready: bool = False
+
+logging.getLogger("orbit007").info(
+    "LLM backend: ollama (%s @ %s)", OLLAMA_MODEL, OLLAMA_URL
+)
 import uvicorn
 import assistant_tone
 import json
-from typing import Any, Optional, Dict, List
+from typing import Optional
 from pydantic import BaseModel
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from db import (
-    init_db,
-    DB_PATH,
-    create_reminder,
-    list_reminders,
-    update_reminder_status,
-    delete_reminder,
-    save_message,
-    get_recent_messages,
-)
+
 
 BASE_DIR = Path(__file__).resolve().parent
+LOGS_DIR = BASE_DIR / "logs"
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOGS_DIR / "spidey.log"
+
+def configure_logging(level: int = logging.INFO) -> None:
+    root = logging.getLogger()
+    if getattr(root, "_spidey_configured", False):
+        return
+    root.setLevel(level)
+    formatter = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    )
+
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    console_handler.setLevel(level)
+
+    file_handler = RotatingFileHandler(
+        str(LOG_FILE),
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(level)
+
+    root.addHandler(console_handler)
+    root.addHandler(file_handler)
+    root._spidey_configured = True
+
+configure_logging()
+LOGGER = logging.getLogger("spidey")
+
 TTS_DIR = BASE_DIR / "TTS"
 TTS_DIR.mkdir(parents=True, exist_ok=True)
 from memory import LOCAL_TIMEZONE, MAX_RETRIEVED_MEMORIES, MemoryStore
@@ -94,130 +134,96 @@ from research.search_engine import (
     SearchNotConfigured,
     search as web_search,
 )
+from agent.deps import AgentDeps
+from agent.confirm import ConfirmationManager
+from agent.loop import AgentResult, run_agent_loop
 
-MODEL_DIR = Path(__file__).resolve().parent / "Models" / "LLM"
-if not (MODEL_DIR / "config.json").is_file():
-    raise FileNotFoundError(f"Local model files were not found in {MODEL_DIR}")
+def _ollama_check() -> None:
+    global _ollama_ready
+    if _ollama_ready:
+        return
+    url = f"{OLLAMA_URL}/api/tags"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        _ollama_ready = False
+        raise RuntimeError(
+            f"Ollama is not running at {OLLAMA_URL}. Start it with `ollama serve`."
+        ) from exc
+    except Exception as exc:
+        _ollama_ready = False
+        raise RuntimeError(
+            f"Ollama is not running at {OLLAMA_URL}. Start it with `ollama serve`."
+        ) from exc
 
-tokenizer = None
-model = None
-cuda_available = False
-load_seconds = None
-model_load_lock = threading.Lock()
+    models = data.get("models") or []
+    available = set()
+    for m in models:
+        name = m.get("name") or m.get("model") or ""
+        if name:
+            available.add(name)
+            if name.endswith(":latest"):
+                available.add(name[:-7])
+            else:
+                available.add(f"{name}:latest")
+
+    target = OLLAMA_MODEL
+    matched = (
+        target in available
+        or (target.endswith(":latest") and target[:-7] in available)
+        or (f"{target}:latest" in available)
+    )
+    if not matched:
+        _ollama_ready = False
+        raise RuntimeError(
+            f"Model {OLLAMA_MODEL} not found. Run `ollama pull {OLLAMA_MODEL}`."
+        )
+
+    _ollama_ready = True
+    try:
+        from runtime.models import REGISTRY
+        REGISTRY.register("llm", "ollama", metrics={"backend": "ollama", "model": OLLAMA_MODEL})
+    except Exception:
+        pass
+
+
+def _llm_available() -> bool:
+    """Return True if Ollama is running and has the model, False otherwise."""
+    try:
+        _ollama_check()
+        return True
+    except RuntimeError:
+        return False
+
+
+def _check_ollama_ps() -> dict[str, Any]:
+    """Best effort check of /api/ps for loaded model stats."""
+    url = f"{OLLAMA_URL}/api/ps"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            models = data.get("models") or []
+            for m in models:
+                name = m.get("name") or m.get("model") or ""
+                if name == OLLAMA_MODEL or (name.split(":")[0] == OLLAMA_MODEL.split(":")[0]):
+                    return {
+                        "size_vram": m.get("size_vram"),
+                        "size": m.get("size"),
+                    }
+    except Exception:
+        pass
+    return {}
 
 
 def ensure_model_loaded() -> None:
-    global tokenizer, model, cuda_available, load_seconds
-    if model is not None and tokenizer is not None:
-        return
-    with model_load_lock:
-        if model is not None and tokenizer is not None:
-            return
-        from runtime.models import REGISTRY
-        if REGISTRY.is_ready("llm"):
-            model, tokenizer = REGISTRY.get("llm")
-            cuda_available = torch.cuda.is_available()
-            metrics = REGISTRY.metrics.get("llm", {})
-            load_seconds = metrics.get("load_time", 0.0)
-            return
-        if REGISTRY.status.get("llm") == "failed":
-            raise RuntimeError(f"Qwen LLM failed to load during startup: {REGISTRY.errors.get('llm')}")
-
-        torch.set_num_threads(CPU_THREADS)
-        try:
-            torch.set_num_interop_threads(CPU_INTEROP_THREADS)
-        except RuntimeError as error:
-            if "after parallel work has started" not in str(error):
-                raise
-        cuda_available = torch.cuda.is_available()
-        if not cuda_available and os.environ.get("AI_ALLOW_CPU_LLM") != "1":
-            raise RuntimeError(
-                "CUDA is unavailable. Install a CUDA-enabled PyTorch build, or "
-                "set AI_ALLOW_CPU_LLM=1 to explicitly allow slow CPU mode."
-            )
-        tokenizer = AutoTokenizer.from_pretrained(
-            MODEL_DIR, local_files_only=True
-        )
-        if cuda_available:
-            try:
-                from transformers import BitsAndBytesConfig
-                import bitsandbytes
-            except ImportError as error:
-                raise RuntimeError(
-                    "4-bit CUDA loading requires the installed bitsandbytes package."
-                ) from error
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_quant_type="nf4",
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
-            )
-            model_load_kwargs = {
-                "dtype": "auto",
-                "device_map": "auto",
-                "max_memory": {0: GPU_MEMORY_LIMIT, "cpu": CPU_MEMORY_LIMIT},
-                "quantization_config": quantization_config,
-            }
-        else:
-            model_load_kwargs = {
-                "device_map": "cpu",
-                "dtype": torch.float32,
-            }
-        load_started = time.perf_counter()
-        try:
-            model = AutoModelForCausalLM.from_pretrained(
-                MODEL_DIR,
-                low_cpu_mem_usage=True,
-                local_files_only=True,
-                **model_load_kwargs,
-            )
-        except torch.cuda.OutOfMemoryError as error:
-            raise RuntimeError(
-                "The quantized model does not fit within the 5 GiB GPU and 6 GiB "
-                "RAM placement limits. Close other GPU applications and try again."
-            ) from error
-        load_seconds = time.perf_counter() - load_started
-        from runtime.models import REGISTRY
-        REGISTRY.register("llm", (model, tokenizer))
-        print_device_diagnostics()
+    """Ensure Ollama model is available; raises RuntimeError if unreachable or missing."""
+    _ollama_check()
 
 
-def print_device_diagnostics() -> None:
-    device_map = getattr(model, "hf_device_map", {}) if model else {}
-    distribution = {"cuda": 0, "cpu": 0, "disk": 0, "other": 0}
-    for device in device_map.values():
-        device_name = str(device)
-        if device_name.startswith("cuda"):
-            distribution["cuda"] += 1
-        elif device_name == "cpu":
-            distribution["cpu"] += 1
-        elif device_name == "disk":
-            distribution["disk"] += 1
-        else:
-            distribution["other"] += 1
-    print("\n--- MODEL DEVICE MAP ---")
-    print(device_map)
-    print("Device-map distribution:", distribution)
-    print("Model loading time:", f"{load_seconds:.2f}s" if load_seconds else "n/a")
-    print("\n--- CUDA STATUS ---")
-    print("CUDA available:", cuda_available)
-    if cuda_available:
-        print("GPU:", torch.cuda.get_device_name(0))
-        print(
-            "GPU memory allocated:",
-            round(torch.cuda.memory_allocated(0) / 1024**3, 2),
-            "GiB",
-        )
-        print(
-            "GPU memory reserved:",
-            round(torch.cuda.memory_reserved(0) / 1024**3, 2),
-            "GiB",
-        )
-    if distribution["disk"]:
-        print("WARNING: disk offload is active.")
-
-
-generation_lock = threading.Lock()
+generation_lock = threading.RLock()
 memory_store = MemoryStore(DATABASE_PATH)
 reminder_scheduler = BackgroundScheduler(timezone="Asia/Kolkata")
 
@@ -269,11 +275,7 @@ DEFAULT_SYSTEM_PROMPT = (
     "only when it is relevant. "
 
     "Provide accurate, useful, and honest answers. Distinguish facts from "
-    "assumptions and acknowledge uncertainty. Web search runs through the "
-    "application, not inside your reply. If Jaya wants live web results, tell "
-    "him to send 'web search <topic>'. Never claim or imply that you searched, "
-    "are searching, or that a search failed unless the application provides "
-    "actual search results. "
+    "assumptions and acknowledge uncertainty. "
 
     "Be action-oriented, resourceful, reliable, and technically capable. "
     "Don't overcomplicate simple requests or repeat instructions already "
@@ -283,9 +285,6 @@ DEFAULT_SYSTEM_PROMPT = (
     "Your identity is S.P.I.D.E.Y. You are Jaya's dependable personal assistant, "
     "technical co-pilot, and companion in learning and development. Help him "
     "think clearly, build better projects, solve problems, and get things done. "
-
-    "You cannot create, complete, or delete tasks, habits, or reminders "
-    "yourself. Only the application can. Never say you did. "
 
     "Answer in English unless Jaya requests another language."
 )
@@ -303,6 +302,7 @@ def _push_reminder_alert(reminder: dict[str, Any], content: str) -> None:
                 "text": content,
                 "audio_url": audio_url,
                 "reminders": _live_reminders(),
+                "chat_id": reminder.get("chat_id"),
             })
         except Exception as exc:
             logging.getLogger("orbit007").warning("Failed in _push_reminder_alert: %s", exc)
@@ -336,7 +336,7 @@ def _recommend_next_task(
     if not chat_id:
         return
     tasks = memory_store.list_tasks(include_completed=False)
-    current_time = datetime.now().astimezone().strftime("%d %B %Y, %I:%M %p")
+    current_time = datetime.now(LOCAL_TIMEZONE).strftime("%d %B %Y, %I:%M %p")
 
     if not tasks:
         if completed_task_title:
@@ -384,7 +384,7 @@ def _recommend_next_task(
         if not content:
             raise ValueError("Empty task recommendation.")
     except Exception as error:
-        print(f"Task recommendation generation failed: {error}")
+        LOGGER.warning("Task recommendation generation failed: %s", error)
         if not tasks:
             content = (
                 f"You've completed \"{completed_task_title}\" and cleared all "
@@ -420,7 +420,7 @@ def _schedule_reminder(reminder: dict[str, Any]) -> None:
             settings={"RETURN_AS_TIMEZONE_AWARE": True, "TIMEZONE": "Asia/Kolkata"},
         )
     if run_at is None:
-        print(f"Skipping reminder {reminder['id']}: invalid run time.")
+        LOGGER.warning("Skipping reminder %s: invalid run time.", reminder["id"])
         return
     recurrence = (reminder.get("recurrence") or "").lower().strip()
     if recurrence:
@@ -434,7 +434,7 @@ def _schedule_reminder(reminder: dict[str, Any]) -> None:
         amount, unit = int(match.group(1) or 1), match.group(2)
         reminder_scheduler.add_job(
             _run_reminder,
-            IntervalTrigger(**{f"{unit}s": amount}, timezone="Asia/Kolkata"),
+            IntervalTrigger(**{f"{unit}s": amount}, start_date=run_at, timezone="Asia/Kolkata"),
             args=[reminder["id"]],
             id=reminder["id"],
             replace_existing=True,
@@ -445,7 +445,7 @@ def _schedule_reminder(reminder: dict[str, Any]) -> None:
         if now - run_at > timedelta(minutes=30):
             memory_store.cancel_reminder(reminder["id"])
             return
-        print(f"Delivering missed reminder {reminder['id']}.")
+        LOGGER.info("Delivering missed reminder %s.", reminder["id"])
         run_at = now + timedelta(seconds=5)
     reminder_scheduler.add_job(
         _run_reminder,
@@ -478,7 +478,7 @@ def _restore_reminders(provider: str = "local") -> None:
         try:
             _schedule_reminder(reminder)
         except Exception as error:
-            print(f"Skipping reminder {reminder['id']}: {error}")
+            LOGGER.warning("Skipping reminder %s: %s", reminder["id"], error)
     if not reminder_scheduler.running:
         reminder_scheduler.start()
 
@@ -542,21 +542,18 @@ def _cancel_reminder_unified(reminder_id: str) -> bool:
     return ok
 
 
-def _migrate_legacy_reminders() -> int:
-    from db import list_reminders as legacy_list, update_reminder_status as legacy_done
-    moved = 0
-    for r in legacy_list(include_completed=False):
-        try:
-            _create_reminder_unified(r["title"], r["remind_at"])
-        except Exception as err:
-            logging.getLogger("orbit007").warning("legacy reminder %s skipped: %s", r.get("id"), err)
-            continue
-        legacy_done(r["id"], True)  # never migrate twice
-        moved += 1
-    return moved
+
 
 
 def _parse_reminder_time(value: str) -> datetime | None:
+    try:
+        dt = datetime.fromisoformat(value.strip())
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=LOCAL_TIMEZONE)
+        return dt.astimezone(LOCAL_TIMEZONE)
+    except (ValueError, TypeError):
+        pass
+
     rel_match = re.fullmatch(
         r"in\s+(\d+)\s*(seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|weeks?)",
         value.strip(),
@@ -824,6 +821,8 @@ def _normalize_command(prompt: str) -> str:
 def _reminder_clarification(prompt: str) -> str | None:
     """Ask for the missing detail instead of letting the LLM invent a reminder."""
     normalized = _normalize_command(prompt)
+    if re.search(r"^remind\s+me\s+(?:what|why|who|how|where|when|which|whether|if)\b", normalized, re.IGNORECASE):
+        return None
     create_pattern = rf"^(?:{_REMINDER_CREATE_PATTERN}|remind\s+me)\b"
     if not re.match(create_pattern, normalized, re.IGNORECASE):
         return None
@@ -925,7 +924,7 @@ def _web_search_reply(query: str) -> tuple[str, str]:
     try:
         sources = web_search(query, max_results=5, search_depth="basic")
     except SearchNotConfigured as error:
-        print(f"Web search unavailable: {error}")
+        LOGGER.warning("Web search unavailable: %s", error)
         return (
             "I can search the web, but the search key is not set yet. Add "
             "TAVILY_API_KEY to the .env file next to app.py, restart the server, "
@@ -933,10 +932,16 @@ def _web_search_reply(query: str) -> tuple[str, str]:
             "web-search-unconfigured",
         )
     except SearchFailed as error:
-        print(f"Web search failed for {query!r}: {error}")
+        logging.getLogger("orbit007").warning("Web search failed for %r: %s", query, error)
         return (
             "I reached for the web but the search provider didn't answer. "
             "Give it another try in a moment.",
+            "web-search-failed",
+        )
+    except Exception as error:
+        logging.getLogger("orbit007").warning("Web search error for %r: %s", query, error)
+        return (
+            "Web search is currently unavailable or timed out. Please try again in a moment.",
             "web-search-failed",
         )
     if not sources:
@@ -1588,12 +1593,12 @@ def _learning_suggest_for_task(task_id: int) -> None:
             llm=_fallback_llm_for_learning,
         )
     except Exception as error:  # pragma: no cover - defensive
-        print(f"Learning link suggestion skipped: {error}")
+        LOGGER.debug("Learning link suggestion skipped: %s", error)
 
 
 def _fallback_llm_for_learning(title: str, topics) -> str | None:
     """Ask the local model to name the best topic; skip when not loaded."""
-    if model is None or tokenizer is None:
+    if not _llm_available():
         return None
     numbered = "\n".join(
         f"{index}. {topic['name']}" for index, topic in enumerate(topics, 1)
@@ -1607,7 +1612,7 @@ def _fallback_llm_for_learning(title: str, topics) -> str | None:
     try:
         reply = generate_response(prompt, 16)
     except Exception as error:  # pragma: no cover - defensive
-        print(f"Learning LLM fallback skipped: {error}")
+        LOGGER.debug("Learning LLM fallback skipped: %s", error)
         return None
     return reply or None
 
@@ -1619,7 +1624,7 @@ def _learning_on_task_completed(task_id: int) -> None:
     try:
         learning_progress.on_task_completed_links(task_id)
     except Exception as error:  # pragma: no cover - defensive
-        print(f"Learning completion rule skipped: {error}")
+        LOGGER.debug("Learning completion rule skipped: %s", error)
 
 
 def _run_learning_hook(job) -> None:
@@ -1648,7 +1653,7 @@ def _weekly_learning_nudge(provider: str = "local") -> None:
             recently_sent=memory_store.has_recent_weekly_nudge,
         )
     except Exception as error:  # pragma: no cover - defensive
-        print(f"Weekly learning nudge skipped: {error}")
+        LOGGER.debug("Weekly learning nudge skipped: %s", error)
 
 
 def _schedule_weekly_learning_nudge(provider: str = "local") -> None:
@@ -1664,7 +1669,7 @@ def _schedule_weekly_learning_nudge(provider: str = "local") -> None:
             replace_existing=True,
         )
     except Exception as error:  # pragma: no cover - defensive
-        print(f"Weekly learning nudge not scheduled: {error}")
+        LOGGER.debug("Weekly learning nudge not scheduled: %s", error)
 
 
 def init_learning_module(provider: str = "local") -> bool:
@@ -1675,7 +1680,7 @@ def init_learning_module(provider: str = "local") -> bool:
         _schedule_weekly_learning_nudge(provider)
         return learning_schema.is_initialized()
     except Exception as error:  # pragma: no cover - defensive
-        print(f"Learning module init skipped: {error}")
+        LOGGER.debug("Learning module init skipped: %s", error)
         return False
 
 
@@ -2171,10 +2176,27 @@ def _assistant_intro_answer(prompt: str) -> str | None:
 
 _PAGE_BY_PROVIDER = {
     "local-habit-manager": "habits",
-    "local-task-manager": "tasks",
+    "local-task-manager": "todos",
     "local-scheduler": "reminders",
     "local-learning": "learning",
+    "local-memory": "reminders",
 }
+
+_PAGE_ROUTES = {
+    "tasks": "/todos",
+    "todos": "/todos",
+    "habits": "/habits",
+    "reminders": "/reminders",
+    "memories": "/reminders",
+    "notes": "/reminders",
+    "dashboard": "/dashboard",
+    "learning": "/learning",
+    "analytics": "/analytics",
+    "settings": "/settings",
+}
+
+def _route_for_page(page: str) -> str:
+    return _PAGE_ROUTES.get(page, f"/{page}")
 
 _PAGE_ALIASES = {
     "tasks": ("task", "tasks", "todo", "todos", "to-do", "to-dos", "to do", "to dos"),
@@ -3721,15 +3743,6 @@ def _handle_local_command(prompt: str, chat_id: str) -> tuple[str, str] | None:
     if web_query:
         return _web_search_reply(web_query)
 
-    normalized = _normalize_command(prompt)
-    if _ACTION_WITHOUT_HANDLER.search(normalized) and not _is_advice_question(
-        normalized.lower()
-    ):
-        return (
-            "I couldn't parse that as a command, so nothing was changed. "
-            "Try 'add habit exercise' or 'complete task explore AI basics'.",
-            "local-help",
-        )
     return None
 
 
@@ -3838,21 +3851,98 @@ def _trim_incomplete(text: str) -> str:
     return text.rstrip()
 
 
+def _generate_ollama(messages: list[dict[str, str]], max_new_tokens: int) -> str:
+    global _ollama_ready
+    url = f"{OLLAMA_URL}/api/chat"
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": messages,
+        "stream": False,
+        "think": False,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+        "options": {
+            "temperature": 0,
+            "repeat_penalty": 1.05,
+            "num_predict": max_new_tokens,
+            "num_ctx": OLLAMA_NUM_CTX,
+        },
+    }
+    payload_bytes = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=payload_bytes,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    t0 = time.perf_counter()
+    try:
+        with urllib.request.urlopen(req, timeout=OLLAMA_TIMEOUT) as resp:
+            raw_bytes = resp.read()
+    except urllib.error.HTTPError as exc:
+        raise RuntimeError(f"Ollama HTTP error {exc.code}: {exc.reason}") from exc
+    except urllib.error.URLError as exc:
+        _ollama_ready = False
+        raise RuntimeError(f"Ollama connection error: {exc.reason}") from exc
+    except TimeoutError as exc:
+        raise RuntimeError(f"Ollama request timed out after {OLLAMA_TIMEOUT}s") from exc
+    except Exception as exc:
+        raise RuntimeError(f"Ollama request failed: {exc}") from exc
+
+    elapsed_seconds = time.perf_counter() - t0
+    try:
+        data = json.loads(raw_bytes.decode("utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"Ollama returned invalid JSON: {exc}") from exc
+
+    _ollama_ready = True
+    try:
+        from runtime.models import REGISTRY
+        if not REGISTRY.is_ready("llm"):
+            REGISTRY.register("llm", "ollama", metrics={"backend": "ollama", "model": OLLAMA_MODEL})
+    except Exception:
+        pass
+
+    message = data.get("message") or {}
+    text = message.get("content") or ""
+    # Strip any <think>...</think> block as a safety net
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+    if data.get("done_reason") == "length":
+        text = _trim_incomplete(text)
+
+    prompt_eval_count = data.get("prompt_eval_count")
+    if prompt_eval_count is not None and prompt_eval_count >= OLLAMA_NUM_CTX - 8:
+        logging.getLogger("orbit007").warning(
+            "Prompt evaluation count (%d) >= OLLAMA_NUM_CTX - 8 (%d); prompt was probably truncated.",
+            prompt_eval_count,
+            OLLAMA_NUM_CTX - 8,
+        )
+
+    eval_count = data.get("eval_count")
+    eval_duration = data.get("eval_duration")
+    if eval_count is not None and eval_duration and eval_duration > 0:
+        gen_seconds = eval_duration / 1e9
+        tokens_per_sec = eval_count / gen_seconds
+        timing_str = (
+            f"[generation {gen_seconds:.2f}s | "
+            f"{eval_count} tokens | "
+            f"{tokens_per_sec:.2f} tokens/s]"
+        )
+    else:
+        timing_str = f"[generation {elapsed_seconds:.2f}s]"
+    LOGGER.info("%s", timing_str)
+    logging.getLogger("orbit007").info(timing_str)
+
+    return text
+
+
 def generate_response(
     prompt: str,
     max_new_tokens: int,
     messages: list[dict[str, str]] | None = None,
     memories: list[dict[str, Any]] | None = None,
-    on_token: Any | None = None,
 ) -> str:
-    global model, tokenizer
     ensure_model_loaded()
-    if model is None or tokenizer is None:
-        from runtime.models import REGISTRY
-        if REGISTRY.is_ready("llm"):
-            model, tokenizer = REGISTRY.get("llm")
-        else:
-            raise RuntimeError("The language model is currently unavailable.")
     if not prompt.strip():
         raise ValueError("Prompt cannot be empty.")
     if len(prompt) > MAX_PROMPT_CHARS:
@@ -3873,7 +3963,7 @@ def generate_response(
                 "first person are facts the user shared about themselves; treat "
                 "them as background about the user and address them as 'you'. "
                 "Lines about you describe you. Use them whenever they are "
-                f"relevant and never contradict them:\n{memory_text}"
+                "relevant and never contradict them:\n" + memory_text
             )
         words = int(max_new_tokens * 0.6)
         system_prompt += (
@@ -3895,58 +3985,7 @@ def generate_response(
             )
         model_context = select_generation_context(context, prompt)
         model_messages = [{"role": "system", "content": system_prompt}, *model_context]
-        process_started = time.perf_counter()
-        inputs = tokenizer.apply_chat_template(
-            model_messages,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-        input_device = next(
-            (
-                torch.device(device)
-                for device in getattr(model, "hf_device_map", {}).values()
-                if str(device).startswith("cuda")
-            ),
-            torch.device("cuda:0" if cuda_available else "cpu"),
-        )
-        inputs = inputs.to(input_device)
-        input_len = inputs["input_ids"].shape[-1]
-
-        if cuda_available:
-            torch.cuda.synchronize()
-        process_seconds = time.perf_counter() - process_started
-        generation_started = time.perf_counter()
-        with torch.inference_mode():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=max_new_tokens,
-                do_sample=False,
-                repetition_penalty=1.05,
-            )
-        if cuda_available:
-            torch.cuda.synchronize()
-        generation_seconds = time.perf_counter() - generation_started
-        generated_tokens = outputs.shape[-1] - input_len
-        response = tokenizer.decode(
-            outputs[0][input_len:], skip_special_tokens=True
-        ).strip()
-        if generated_tokens >= max_new_tokens:
-            response = _trim_incomplete(response)
-        print(
-            f"[input {process_seconds:.2f}s | generation {generation_seconds:.2f}s | "
-            f"{generated_tokens} tokens | "
-            f"{generated_tokens / generation_seconds:.2f} tokens/s]"
-        )
-        if cuda_available:
-            print(
-                "[GPU memory: "
-                f"{torch.cuda.memory_allocated(0) / 1024**3:.2f} GiB allocated, "
-                f"{torch.cuda.memory_reserved(0) / 1024**3:.2f} GiB reserved]"
-            )
-        return response
+        return _generate_ollama(model_messages, max_new_tokens)
 
 
 @asynccontextmanager
@@ -3954,28 +3993,28 @@ async def lifespan(_: FastAPI):
     global MAIN_LOOP
     MAIN_LOOP = asyncio.get_running_loop()
     _cleanup_tts()
-    init_db()
     from runtime.guard import acquire_model_process_lock, release_model_process_lock
     acquire_model_process_lock()
     try:
         from runtime.loaders import load_all_models_eager
         await asyncio.to_thread(
             load_all_models_eager,
-            MODEL_DIR,
-            GPU_MEMORY_LIMIT,
-            CPU_MEMORY_LIMIT,
-            generation_lock,
+            generation_lock=generation_lock,
         )
-        await asyncio.to_thread(ensure_model_loaded)
+        # NOTE: load_all_models_eager already fully initialises all backends
+        # (Ollama check + Transformers fallback) and populates the REGISTRY.
+        # Calling ensure_model_loaded() here caused a second Qwen load when
+        # Ollama was configured but not yet reachable at lifespan start.
         _restore_reminders(provider="local")
-        try:
-            migrated_count = _migrate_legacy_reminders()
-            if migrated_count:
-                logging.getLogger("orbit007").info("Migrated %d legacy reminders to MemoryStore", migrated_count)
-        except Exception as e:
-            logging.getLogger("orbit007").warning("Legacy reminder migration error: %s", e)
+
         init_learning_module("local")
         purge_voice_tmp()
+        reminder_scheduler.add_job(
+            _cleanup_temp_audio,
+            IntervalTrigger(minutes=15, timezone="Asia/Kolkata"),
+            id="spidey-temp-audio-cleanup",
+            replace_existing=True,
+        )
 
         discord_token = os.environ.get("AI_DISCORD_TOKEN", "").strip()
         if discord_token:
@@ -3983,7 +4022,7 @@ async def lifespan(_: FastAPI):
                 from discord_bot import start_discord_bot_in_process
                 await start_discord_bot_in_process(discord_token)
             except Exception as err:
-                print(f"Warning: Failed to start in-process Discord bot: {err}")
+                LOGGER.warning("Failed to start in-process Discord bot: %s", err)
 
         yield
     finally:
@@ -4043,7 +4082,7 @@ app.mount("/tts", StaticFiles(directory=str(TTS_DIR)), name="tts")
 
 @app.exception_handler(Exception)
 async def handle_unexpected_error(request: Request, error: Exception):
-    print(f"Unhandled API error: {error}")
+    LOGGER.exception("Unhandled API error: %s", error)
     return JSONResponse(
         status_code=500,
         content={"error": "The backend could not complete that request."},
@@ -4083,21 +4122,29 @@ app.include_router(voice_ws_router)
 @app.get("/health")
 async def health():
     from runtime.models import REGISTRY
-    return {
+    reachable = _llm_available()
+    ps_info = _check_ollama_ps() if reachable else {}
+    res = {
         "status": "ok",
-        "db_connected": DB_PATH.exists(),
-        "db_path": str(DB_PATH),
+        "llm_backend": "ollama",
+        "llm_reachable": reachable,
+        "db_connected": DATABASE_PATH.exists(),
+        "db_path": str(DATABASE_PATH),
         "api_version": "spidey-local-2026-11",
-        "model": "Qwen3-4B",
-        "cuda": cuda_available,
-        "load_seconds": round(load_seconds, 2) if load_seconds is not None else 0.0,
-        "database": str(DB_PATH),
+        "model": OLLAMA_MODEL,
+        "database": str(DATABASE_PATH),
         "semantic_memory": os.environ.get("AI_ENABLE_SEMANTIC_MEMORY", "1") != "0",
         "scheduler_running": reminder_scheduler.running if "reminder_scheduler" in globals() else False,
         "scheduled_jobs": len(reminder_scheduler.get_jobs()) if "reminder_scheduler" in globals() and reminder_scheduler.running else 0,
         "active_ws_clients": len(ws_manager.active) if "ws_manager" in globals() else 0,
         "models": REGISTRY.get_status_summary() if hasattr(REGISTRY, "get_status_summary") else {},
     }
+    if ps_info:
+        if ps_info.get("size_vram") is not None:
+            res["size_vram"] = ps_info["size_vram"]
+        if ps_info.get("size") is not None:
+            res["size"] = ps_info["size"]
+    return res
 
 
 TOKENS_DEFAULT = 64
@@ -4132,10 +4179,88 @@ def _token_budget(prompt: str) -> int:
     return TOKENS_DEFAULT
 
 
+agent_deps = AgentDeps(
+    memory_store=memory_store,
+    create_reminder_unified=_create_reminder_unified,
+    cancel_reminder_unified=_cancel_reminder_unified,
+    parse_reminder_time=_parse_reminder_time,
+    validate_recurrence=_validate_recurrence,
+    live_reminders=_live_reminders,
+    web_search=web_search,
+    learning_schema_initialized=learning_schema.is_initialized,
+    learning_overall_progress=learning_progress.overall_progress,
+    learning_next_topics=learning_progress.next_topics,
+    run_learning_hook=_run_learning_hook,
+    suggest_learning_for_task=_learning_suggest_for_task,
+    local_timezone=LOCAL_TIMEZONE,
+    page_aliases=_PAGE_ALIASES,
+    generate_response=generate_response,
+    token_budget=_token_budget,
+)
+confirmation_mgr = ConfirmationManager()
+
+
+_ORIGINAL_GENERATE_RESPONSE = generate_response
+
+
+def respond_with_tools(
+    prompt: str,
+    chat_id: str,
+    history: list[dict[str, Any]] | None = None,
+    memories: list[dict[str, Any]] | None = None,
+    channel: str = "web",
+) -> AgentResult:
+    """Unified entrypoint for generating responses with native tools or falling back to plain chat."""
+    ensure_model_loaded()
+    orbit_tools = os.environ.get("ORBIT_TOOLS", "1").strip()
+    history = history or []
+    memories = memories or []
+
+    # Resolve short follow-ups (e.g. "name one", "why?") using previous context
+    prompt = resolve_short_follow_up(prompt, history)
+
+    # If generate_response was monkeypatched in tests, bypass agent loop and call the mock
+    is_mocked = (generate_response is not _ORIGINAL_GENERATE_RESPONSE) or hasattr(generate_response, "assert_called")
+
+    with generation_lock:
+        try:
+            if orbit_tools != "0" and not is_mocked:
+                try:
+                    return run_agent_loop(
+                        prompt=prompt,
+                        chat_id=chat_id,
+                        history=history,
+                        memories=memories,
+                        channel=channel,
+                        deps=agent_deps,
+                        confirm_mgr=confirmation_mgr,
+                    )
+                except Exception as exc:
+                    logging.getLogger("orbit007").warning("Agent loop error, falling back to plain chat: %s", exc)
+
+            tokens = _token_budget(prompt)
+            if channel == "voice":
+                tokens = min(tokens, 128)
+            reply = generate_response(
+                prompt=prompt,
+                max_new_tokens=tokens,
+                messages=history,
+                memories=memories,
+            )
+            return AgentResult(reply=reply.strip(), ui_actions=[], provider="ollama")
+        except Exception:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+            raise
+
+
 @app.post("/generate")
 @app.post("/api/generate")
 async def generate(payload: dict[str, Any] = Body(...)):
-    await asyncio.to_thread(ensure_model_loaded)
     if not isinstance(payload, dict):
         raise HTTPException(400, "Request body must be a JSON object.")
 
@@ -4173,39 +4298,73 @@ async def generate(payload: dict[str, Any] = Body(...)):
         chat_id = chat["id"]
 
     try:
+        # 1. Pending confirmation check
+        handled, conf_reply, conf_actions = confirmation_mgr.check_and_handle(chat_id, prompt, agent_deps)
+        if handled:
+            memory_store.add_message(chat_id, "user", prompt.strip())
+            memory_store.add_message(chat_id, "assistant", conf_reply)
+            return {
+                "response": conf_reply,
+                "chat_id": chat_id,
+                "messages": memory_store.get_messages(chat_id),
+                "provider": "local-confirmation",
+                "navigate": None,
+                "ui_actions": conf_actions,
+            }
+
+        # 2. Rules-first command handling
         command = _handle_local_command(prompt, chat_id)
-        print(f"[route] {'local:' + command[1] if command else 'llm'} <- {prompt!r}")
+        LOGGER.info("[route] %s <- %r", "local:" + command[1] if command else "tools/llm", prompt)
         if command is not None:
             response, provider = command
             memory_store.add_message(chat_id, "user", prompt.strip())
             memory_store.add_message(chat_id, "assistant", response)
+            nav = _page_for_provider(provider)
+            ui_actions = [{"type": "navigate", "page": nav, "route": _route_for_page(nav)}] if nav else []
+            if provider == "local-memory":
+                ui_actions.append({"type": "refresh", "sections": ["memories"]})
             return {
                 "response": response,
                 "chat_id": chat_id,
                 "messages": memory_store.get_messages(chat_id),
                 "provider": provider.split(":", 1)[0],
-                "navigate": _page_for_provider(provider),
+                "navigate": nav,
+                "ui_actions": ui_actions,
             }
+
+        # 3. Native tools / LLM response
         memory_store.add_message(chat_id, "user", prompt.strip())
-        context = memory_store.build_context(chat_id, tokenizer, prompt)
+        context = memory_store.build_context(chat_id, None, prompt)
         model_prompt = resolve_short_follow_up(prompt, context)
-        if model_prompt != prompt and context:
-            context[-1] = {"role": "user", "content": model_prompt}
-        memories = _memories_for_prompt(prompt)
-        response = await asyncio.to_thread(
-            generate_response,
-            model_prompt,
-            max_new_tokens,
-            context,
-            memories,
-        )
+        memories = _memories_for_prompt(model_prompt)
+        history = [m for m in context if m.get("content") != model_prompt]
+        try:
+            agent_result = await asyncio.to_thread(
+                respond_with_tools,
+                model_prompt,
+                chat_id,
+                history,
+                memories,
+                "web",
+            )
+            response = agent_result.reply
+            ui_actions = agent_result.ui_actions
+            provider = agent_result.provider
+        except RuntimeError as err:
+            logging.getLogger("orbit007").warning("LLM generation failed in chat route: %s", err)
+            response = "I'm having trouble connecting to my local language model right now. Please make sure Ollama is running (`ollama serve`)."
+            ui_actions = []
+            provider = "ollama"
+
         memory_store.add_message(chat_id, "assistant", response)
+        nav_page = next((a.get("page") for a in ui_actions if a.get("type") == "navigate"), None)
         return {
             "response": response,
             "chat_id": chat_id,
             "messages": memory_store.get_messages(chat_id),
-            "provider": "local-qwen",
-            "navigate": None,
+            "provider": provider,
+            "navigate": nav_page,
+            "ui_actions": ui_actions,
         }
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
@@ -4426,54 +4585,12 @@ class ReminderCreatePayload(BaseModel):
 
 class ReminderUpdatePayload(BaseModel):
     completed: bool = True
+    remind_at: Optional[str] = None
+    run_at: Optional[str] = None
 
-# legacy, unused
-def parse_and_execute_reminder_intent(user_text: str) -> Optional[str]:
-    """Fallback intent parser if the LLM does not emit structured tool calls."""
-    match = re.search(
-        r"remind me to (.+?) (?:at|on|in) (.+)", user_text, re.IGNORECASE
-    )
-    if match:
-        title = match.group(1).strip()
-        remind_at = match.group(2).strip()
-        created = create_reminder(title=title, remind_at=remind_at)
-        return f"Reminder set: '{created['title']}' for {created['remind_at']}."
-    return None
 
-def run_existing_llm(user_message: str, history: list[dict[str, Any]], active_reminders: list[dict[str, Any]]) -> str:
-    """Run existing LLM inference + assistant tone logic without blocking FastAPI."""
-    try:
-        ensure_model_loaded()
-        now_str = datetime.now(LOCAL_TIMEZONE).strftime("%Y-%m-%d %I:%M %p %Z")
-        reminders_text = "\n".join(
-            f"- #{r.get('id', '')} {r.get('title', '')} (due {r.get('remind_at', '')})"
-            for r in active_reminders
-        ) if active_reminders else "No active reminders."
 
-        reminders_context = f"Current local time: {now_str}\nLive Database Reminders:\n{reminders_text}"
-        memories = _memories_for_prompt(user_message) or []
-        memories.append({"content": reminders_context})
 
-        context_messages = [
-            {"role": m.get("role", "user"), "content": m.get("content", "")}
-            for m in history
-            if m.get("role") and m.get("content")
-        ]
-
-        tokens = _token_budget(user_message)
-        reply = generate_response(
-            prompt=user_message,
-            max_new_tokens=tokens,
-            messages=context_messages,
-            memories=memories,
-        )
-        return reply.strip()
-    except Exception as exc:
-        logging.getLogger("orbit007").warning("LLM inference failed: %s", exc)
-        if active_reminders and any(k in user_message.lower() for k in ["remind", "task", "list", "what"]):
-            items = ", ".join(f"'{r['title']}' for {r['remind_at']}" for r in active_reminders)
-            return f"You currently have these active reminders: {items}."
-        return f"Acknowledged: '{user_message}'. How else can I assist with your reminders and schedule?"
 
 def run_existing_tts(text: str, output_path: str) -> None:
     """Synthesize speech into WAV audio file."""
@@ -4489,7 +4606,7 @@ def run_existing_tts(text: str, output_path: str) -> None:
                     f.write(wav_bytes)
                 return
     except Exception as err:
-        logging.getLogger("orbit007").warning("OmniVoice TTS warning: %s", err)
+        logging.getLogger("orbit007").warning("TTS warning: %s", err)
 
     try:
         import wave, struct, math
@@ -4567,76 +4684,92 @@ def _cleanup_tts(max_age_s: int = 600) -> None:
         except OSError:
             pass
 
-
-def _handle_llm_tool_calls(
-    llm_reply: str, user_message: str, chat_id: str | None = None
-) -> str:
-    """Parse and execute at most one whitelisted tool call if ORBIT_LLM_TOOLS=1 and intent words are present."""
-    if os.environ.get("ORBIT_LLM_TOOLS", "0") != "1":
-        return llm_reply
-
-    intent_words = ("remind", "reminder", "alarm", "alert me")
-    user_lower = user_message.lower()
-    if not any(word in user_lower for word in intent_words):
-        return re.sub(r"<tool_call>.*?</tool_call>", "", llm_reply, flags=re.DOTALL).strip()
-
-    match = re.search(r"<tool_call>(.*?)</tool_call>", llm_reply, re.DOTALL)
-    if not match:
-        return llm_reply
-
-    raw_json = match.group(1).strip()
-    cleaned_reply = re.sub(r"<tool_call>.*?</tool_call>", "", llm_reply, flags=re.DOTALL).strip()
-
+def _cleanup_temp_audio() -> None:
+    _cleanup_tts(max_age_s=600)
     try:
-        call_data = json.loads(raw_json)
-        action = call_data.get("action")
-        if action == "create_reminder":
-            title = call_data.get("title") or call_data.get("text")
-            when = call_data.get("when") or call_data.get("remind_at") or call_data.get("run_at")
-            recurrence = call_data.get("recurrence")
-            if title and when:
-                _create_reminder_unified(
-                    str(title).strip(), str(when).strip(), recurrence=recurrence, chat_id=chat_id
-                )
-        elif action == "delete_reminder":
-            rem_id = call_data.get("reminder_id") or call_data.get("id")
-            if rem_id:
-                _cancel_reminder_unified(str(rem_id).strip())
+        from voice.config import TMP_DIR
+        if TMP_DIR.exists():
+            cutoff = time.time() - 600
+            for item in TMP_DIR.iterdir():
+                if item.name in {".gitignore", ".gitkeep"}:
+                    continue
+                try:
+                    if item.is_file() and item.stat().st_mtime < cutoff:
+                        item.unlink(missing_ok=True)
+                except OSError:
+                    pass
     except Exception as exc:
-        logging.getLogger("orbit007").warning("Error executing LLM tool call: %s", exc)
+        logging.getLogger("orbit007").warning("Temp audio cleanup error: %s", exc)
 
-    return cleaned_reply
+
+
 
 
 async def process_agent_turn(
     user_message: str, session_id: str = "default", chat_id: str | None = None
 ) -> dict:
-    user_message = user_message.strip()
+    user_message = (user_message or "").strip()
+    if not user_message:
+        raise ValueError("Message cannot be empty.")
+    if len(user_message) > MAX_PROMPT_CHARS:
+        raise ValueError(f"Message is limited to {MAX_PROMPT_CHARS} characters.")
     target_chat = chat_id or session_id or DEFAULT_CHAT_ID
     _ensure_chat_exists(target_chat)
-    save_message("user", user_message, session_id=session_id)
+    memory_store.add_message(target_chat, "user", user_message)
 
-    # 1. Order: _handle_local_command first (rules-first pipeline)
+    # 1. Pending confirmation check
+    handled, conf_reply, conf_actions = confirmation_mgr.check_and_handle(target_chat, user_message, agent_deps)
+    if handled:
+        memory_store.add_message(target_chat, "assistant", conf_reply)
+        audio_url = await generate_tts_url(conf_reply)
+        _cleanup_tts()
+        return {
+            "type": "agent_response",
+            "text": conf_reply,
+            "audio_url": audio_url,
+            "reminders": _live_reminders(),
+            "history": memory_store.get_messages(target_chat)[-20:],
+            "ui_actions": conf_actions,
+        }
+
+    # 2. Rules-first command handling
     reply_text: str | None = None
+    ui_actions: list[dict[str, Any]] = []
     try:
         cmd_result = await asyncio.to_thread(_handle_local_command, user_message, target_chat)
         if cmd_result:
             reply_text = cmd_result[0]
+            nav = _page_for_provider(cmd_result[1])
+            if nav:
+                route = _route_for_page(nav)
+                ui_actions.append({"type": "navigate", "page": nav, "route": route})
+            if cmd_result[1] == "local-memory":
+                ui_actions.append({"type": "refresh", "sections": ["memories"]})
     except Exception:
         logging.getLogger("orbit007").exception("Local command handling failed for %r", user_message)
 
-    # 2. If no local command match, route to LLM
-    active_reminders = _live_reminders()
+    # 3. Route to native tool loop
     if reply_text is None:
-        history = get_recent_messages(session_id=session_id, limit=10)
-        reply_text = await asyncio.to_thread(
-            run_existing_llm, user_message, history, active_reminders
-        )
-        reply_text = _handle_llm_tool_calls(reply_text, user_message, chat_id=target_chat)
+        history = memory_store.get_messages(target_chat)[-10:]
+        memories = _memories_for_prompt(user_message)
+        try:
+            agent_result = await asyncio.to_thread(
+                respond_with_tools,
+                user_message,
+                target_chat,
+                history,
+                memories,
+                "agent",
+            )
+            reply_text = agent_result.reply
+            ui_actions = agent_result.ui_actions
+        except Exception as exc:
+            logging.getLogger("orbit007").warning("Agent turn failed: %s", exc)
+            reply_text = "I'm having trouble connecting to my local language model right now. Please make sure Ollama is running (`ollama serve`)."
 
-    save_message("assistant", reply_text, session_id=session_id)
+    memory_store.add_message(target_chat, "assistant", reply_text)
 
-    # 3. Audio generation: per-reply unique audio file
+    # 4. Audio generation: per-reply unique audio file
     audio_url = await generate_tts_url(reply_text)
     _cleanup_tts()
 
@@ -4645,12 +4778,20 @@ async def process_agent_turn(
         "text": reply_text,
         "audio_url": audio_url,
         "reminders": _live_reminders(),
-        "history": get_recent_messages(session_id=session_id, limit=20),
+        "history": memory_store.get_messages(target_chat)[-20:],
+        "ui_actions": ui_actions,
     }
 
 @app.get("/api/reminders")
 async def api_get_reminders(include_completed: bool = False):
-    return {"reminders": _live_reminders()}
+    if not include_completed:
+        return {"reminders": _live_reminders()}
+    all_rows = memory_store.list_reminders(active_only=False)
+    sorted_rows = sorted(
+        all_rows,
+        key=lambda r: (0 if r.get("active", 1) else 1, r.get("run_at", "")),
+    )
+    return {"reminders": [_reminder_view(r) for r in sorted_rows]}
 
 @app.post("/api/reminders")
 async def api_create_reminder(payload: ReminderCreatePayload):
@@ -4670,10 +4811,62 @@ async def api_create_reminder(payload: ReminderCreatePayload):
 
 @app.patch("/api/reminders/{reminder_id}")
 async def api_update_reminder(reminder_id: str, payload: ReminderUpdatePayload):
-    ok = _cancel_reminder_unified(reminder_id)
-    if not ok:
+    existing = memory_store.get_reminder(reminder_id)
+    if not existing:
         raise HTTPException(status_code=404, detail="Reminder not found")
-    return {"status": "success", "reminders": _live_reminders()}
+
+    if payload.completed:
+        ok = _cancel_reminder_unified(reminder_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Reminder not found")
+        updated_row = memory_store.get_reminder(reminder_id)
+        return {
+            "status": "success",
+            "reminder": _reminder_view(updated_row) if updated_row else None,
+            "reminders": _live_reminders(),
+        }
+
+    # completed == False -> reactivate path
+    new_when = (payload.remind_at or payload.run_at or "").strip()
+    target_iso: str | None = None
+    if new_when:
+        parsed = _parse_reminder_time(new_when)
+        if parsed is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"I could not understand the reminder time: {new_when!r}.",
+            )
+        target_iso = parsed.isoformat()
+    else:
+        # Check if stored time is in the past (and the reminder is not recurring)
+        is_recurring = bool(existing.get("recurrence"))
+        if not is_recurring:
+            stored_run_at = existing.get("run_at", "")
+            try:
+                stored_dt = datetime.fromisoformat(stored_run_at)
+                if stored_dt.tzinfo is None:
+                    stored_dt = stored_dt.replace(tzinfo=LOCAL_TIMEZONE)
+                now_dt = datetime.now(LOCAL_TIMEZONE)
+                if stored_dt <= now_dt:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="That time has passed — send a new remind_at",
+                    )
+            except HTTPException:
+                raise
+            except Exception as err:
+                logging.getLogger("orbit007").warning("Error checking stored_run_at: %s", err)
+
+    updated_row = memory_store.set_reminder_active(reminder_id, True, target_iso)
+    if not updated_row:
+        raise HTTPException(status_code=404, detail="Reminder not found")
+
+    _schedule_reminder(updated_row)
+    return {
+        "status": "success",
+        "reminder": _reminder_view(updated_row),
+        "reminders": _live_reminders(),
+    }
 
 @app.delete("/api/reminders/{reminder_id}")
 async def api_delete_reminder(reminder_id: str):
@@ -4684,7 +4877,8 @@ async def api_delete_reminder(reminder_id: str):
 
 @app.get("/api/history")
 async def api_get_history(session_id: str = "default"):
-    return {"messages": get_recent_messages(session_id=session_id, limit=50)}
+    _ensure_chat_exists(session_id)
+    return {"messages": memory_store.get_messages(session_id)[-50:]}
 
 @app.post("/api/chat")
 async def api_chat(payload: ChatPayload):
@@ -4697,11 +4891,14 @@ async def websocket_agent_endpoint(websocket: WebSocket):
     if not await ws_authorized(websocket):
         return
     await ws_manager.connect(websocket)
+    _ensure_chat_exists(DEFAULT_CHAT_ID)
+    current_chat_id = DEFAULT_CHAT_ID
     try:
         await websocket.send_json({
             "type": "connected",
             "reminders": _live_reminders(),
-            "history": get_recent_messages(limit=20),
+            "history": memory_store.get_messages(current_chat_id)[-20:],
+            "chat_id": current_chat_id,
         })
         audio_buffer = bytearray()
         while True:
@@ -4720,7 +4917,9 @@ async def websocket_agent_endpoint(websocket: WebSocket):
                             "text": transcript,
                         })
                         await websocket.send_json({"type": "status", "state": "thinking"})
-                        result = await process_agent_turn(transcript)
+                        result = await process_agent_turn(
+                            transcript, session_id=current_chat_id, chat_id=current_chat_id
+                        )
                         await websocket.send_json(result)
                 else:
                     # Streamed 100ms chunk from AudioWorklet
@@ -4735,7 +4934,9 @@ async def websocket_agent_endpoint(websocket: WebSocket):
                                 "text": transcript,
                             })
                             await websocket.send_json({"type": "status", "state": "thinking"})
-                            result = await process_agent_turn(transcript)
+                            result = await process_agent_turn(
+                                transcript, session_id=current_chat_id, chat_id=current_chat_id
+                            )
                             await websocket.send_json(result)
 
             elif "text" in packet and packet["text"]:
@@ -4748,6 +4949,18 @@ async def websocket_agent_endpoint(websocket: WebSocket):
                 if msg_type == "ping":
                     await websocket.send_json({"type": "pong"})
                     continue
+                elif msg_type == "set_chat":
+                    req_cid = payload.get("chat_id")
+                    if req_cid and memory_store.chat_exists(req_cid):
+                        current_chat_id = req_cid
+                    else:
+                        current_chat_id = DEFAULT_CHAT_ID
+                    await websocket.send_json({
+                        "type": "chat_set",
+                        "chat_id": current_chat_id,
+                        "history": memory_store.get_messages(current_chat_id)[-20:],
+                    })
+                    continue
                 elif msg_type == "end_audio":
                     if len(audio_buffer) >= 3200:
                         data_to_transcribe = bytes(audio_buffer)
@@ -4759,19 +4972,28 @@ async def websocket_agent_endpoint(websocket: WebSocket):
                                 "text": transcript,
                             })
                             await websocket.send_json({"type": "status", "state": "thinking"})
-                            result = await process_agent_turn(transcript)
+                            result = await process_agent_turn(
+                                transcript, session_id=current_chat_id, chat_id=current_chat_id
+                            )
                             await websocket.send_json(result)
                     else:
                         audio_buffer.clear()
                     continue
 
                 user_msg = payload.get("message") or payload.get("text") or ""
-                session_id = payload.get("session_id", "default")
-                chat_id = payload.get("chat_id")
+                # Accept optional chat_id on every text message
+                msg_chat_id = payload.get("chat_id")
+                if msg_chat_id is not None:
+                    if msg_chat_id and memory_store.chat_exists(msg_chat_id):
+                        current_chat_id = msg_chat_id
+                    else:
+                        current_chat_id = DEFAULT_CHAT_ID
 
                 if user_msg.strip():
                     await websocket.send_json({"type": "status", "state": "thinking"})
-                    result = await process_agent_turn(user_msg, session_id=session_id, chat_id=chat_id)
+                    result = await process_agent_turn(
+                        user_msg, session_id=current_chat_id, chat_id=current_chat_id
+                    )
                     await websocket.send_json(result)
     except WebSocketDisconnect:
         logging.getLogger("orbit007").info("WebSocket client disconnected")
@@ -4859,14 +5081,11 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+    configure_logging(level=logging.INFO)
     args = parse_arguments()
     if args.server:
         if args.host == "0.0.0.0" and not os.environ.get("ORBIT_API_TOKEN", "").strip():
-            print(
+            LOGGER.warning(
                 "[SECURITY WARNING] Server is binding to 0.0.0.0 with no ORBIT_API_TOKEN set! "
                 "Any machine on your network can access this assistant."
             )

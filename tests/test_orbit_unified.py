@@ -3,15 +3,14 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 import app
-import db
-from memory import LOCAL_TIMEZONE, MemoryStore
+from memory import LOCAL_TIMEZONE
 
 
 def test_1_parse_reminder_time_and_recurrence():
@@ -109,12 +108,8 @@ def test_2_api_reminders_crud(monkeypatch, temp_db):
     assert not any(r["id"] == rem_id for r in remaining)
 
 
-def test_3_process_agent_turn_single_source_of_truth(monkeypatch, temp_db, tmp_path):
-    """3. process_agent_turn creates reminder in MemoryStore and nothing in legacy db."""
-    test_legacy_db = tmp_path / "legacy_test.db"
-    monkeypatch.setattr(db, "DB_PATH", test_legacy_db)
-    db.init_db()
-
+def test_3_process_agent_turn_single_source_of_truth(monkeypatch, temp_db):
+    """3. process_agent_turn creates reminder in MemoryStore and persists messages in MemoryStore."""
     async def _run_turn():
         return await app.process_agent_turn("remind me to call John at 4pm", session_id="test-session")
 
@@ -127,31 +122,12 @@ def test_3_process_agent_turn_single_source_of_truth(monkeypatch, temp_db, tmp_p
     assert len(matching) == 1
     assert matching[0]["active"] == 1
 
-    # Verify legacy DB has 0 reminders
-    legacy_reminders = db.list_reminders(include_completed=True)
-    assert len(legacy_reminders) == 0
-
-
-def test_4_migrate_legacy_reminders(monkeypatch, temp_db, tmp_path):
-    """4. _migrate_legacy_reminders moves valid rows once; unparseable rows skipped."""
-    test_legacy_db = tmp_path / "legacy_migration_test.db"
-    monkeypatch.setattr(db, "DB_PATH", test_legacy_db)
-    db.init_db()
-
-    # Insert one valid row and one invalid row in legacy db
-    r1 = db.create_reminder("Call doctor", "tomorrow 3pm")
-    r2 = db.create_reminder("Broken reminder", "non-existent gibberish time")
-
-    moved = app._migrate_legacy_reminders()
-    assert moved == 1
-
-    # MemoryStore should have "Call doctor"
-    active_mems = [r for r in temp_db.list_reminders() if "Call doctor" in r["text"]]
-    assert len(active_mems) == 1
-
-    # Second migration run should be idempotent (0 moved)
-    moved_second = app._migrate_legacy_reminders()
-    assert moved_second == 0
+    # Verify MemoryStore has the messages
+    msgs = temp_db.get_messages("test-session")
+    assert len(msgs) >= 2
+    assert msgs[0]["role"] == "user"
+    assert "call John" in msgs[0]["content"]
+    assert msgs[1]["role"] == "assistant" 
 
 
 def test_5_run_reminder_persists_and_broadcasts(monkeypatch, temp_db):

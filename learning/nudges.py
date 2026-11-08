@@ -110,7 +110,7 @@ def deliver_weekly_nudge(
         return 0
     now = now or datetime.now(timezone.utc)
     sent = 0
-    with schema.connect() as connection:
+    with schema.connect():
         for chat_id in chat_ids:
             if recently_sent is not None and recently_sent(chat_id, now):
                 continue

@@ -22,6 +22,24 @@ if not discord.opus.is_loaded():
         discord.opus._load_default()
     except Exception as e:
         log.warning("Could not auto-load discord opus: %s", e)
+    if not discord.opus.is_loaded():
+        import sys
+        from pathlib import Path
+        for p in sys.path:
+            candidate = Path(p) / "discord" / "bin" / "libopus-0.x64.dll"
+            if candidate.exists():
+                try:
+                    discord.opus.load_opus(str(candidate))
+                    log.info("Loaded discord opus library from %s", candidate)
+                    break
+                except Exception as err:
+                    log.debug("Failed loading opus from %s: %s", candidate, err)
+
+try:
+    from . import voice_recv_patch
+    voice_recv_patch.install()
+except Exception as e:
+    log.debug("voice_recv_patch not loaded: %s", e)
 
 FRAME_BYTES = 3840  # 20 ms of 48 kHz, 2 channels, 16-bit
 
@@ -155,13 +173,6 @@ if _VOICE_RECV_AVAILABLE and voice_recv is not None:
             now = time.perf_counter()
             energy = _calculate_discord_pcm_energy(pcm)
 
-            # Barge-in: if assistant is speaking and user speaks loud enough, cancel assistant speech
-            if getattr(self.call, "is_speaking", False) and energy >= config.LIVE_BARGE_IN_THRESHOLD:
-                self.call.cancel.set()
-                self.call.source.clear()
-                self.call.cancel = threading.Event()
-                log.info("Barge-in: interrupted assistant speech due to voice input from %s", user.display_name)
-
             user_id = user.id
             with self._lock:
                 if user_id not in self.buffers:
@@ -174,6 +185,13 @@ if _VOICE_RECV_AVAILABLE and voice_recv is not None:
                     }
                 buf = self.buffers[user_id]
                 buf["user"] = user
+
+            # Barge-in: if assistant is speaking and user speaks loud enough, cancel assistant speech
+            if getattr(self.call, "is_speaking", False) and energy >= config.LIVE_BARGE_IN_THRESHOLD:
+                self.call.cancel.set()
+                self.call.source.clear()
+                self.call.cancel = threading.Event()
+                log.info("Barge-in: interrupted assistant speech due to voice input from %s (energy=%.1f)", user.display_name, energy)
 
             if energy >= config.VAD_ENERGY_THRESHOLD:
                 with self._lock:
@@ -303,6 +321,10 @@ class DiscordVoiceManager:
 
             channel_name = getattr(target_channel, 'name', 'voice channel')
             log.info("Joined voice channel %s in guild %s", channel_name, guild_id)
+            if guild_id is not None:
+                asyncio.create_task(
+                    self.speak_text(guild_id, 0, f"Hello! I am connected to {channel_name} and ready.")
+                )
             return True, f"Joined **{channel_name}**. I'm listening and speaking in voice!"
         except Exception as e:
             err_msg = str(e)
@@ -369,20 +391,27 @@ class DiscordVoiceManager:
         status = "enabled" if enabled else "disabled"
         return f"Voice output is now {status}."
 
-    def is_user_allowed(self, user_id: int) -> bool:
+    def is_user_allowed(self, user_id: int | str) -> bool:
+        if not user_id or user_id == 0 or str(user_id) == "0":
+            return True
         if not config.DISCORD_VOICE_ALLOWED_USER_IDS:
             return True
-        return user_id in config.DISCORD_VOICE_ALLOWED_USER_IDS
+        try:
+            return int(user_id) in config.DISCORD_VOICE_ALLOWED_USER_IDS
+        except (ValueError, TypeError):
+            return False
 
     async def speak_text(
-        self, guild_id: int, user_id: int, text: str
+        self, guild_id: int, user_id: int | str, text: str
     ) -> None:
         """Clean, truncate, split, synthesize and stream reply to the active voice channel."""
         call = self.get_call(guild_id)
         if not call or not call.voice_enabled:
+            log.warning("speak_text skipped: call=%s, voice_enabled=%s", call, getattr(call, "voice_enabled", False))
             return
 
         if not self.is_user_allowed(user_id):
+            log.warning("speak_text skipped: user %r not in allowlist %r", user_id, config.DISCORD_VOICE_ALLOWED_USER_IDS)
             return
 
         call.last_active_time = time.perf_counter()
@@ -403,27 +432,57 @@ class DiscordVoiceManager:
             cleaned, max_chars=config.MAX_SENTENCE_CHARS
         )
         if not chunk_list:
+            log.debug("speak_text: no chunks after cleaning text %r", spoken_text[:40])
             return
 
         tts_engine = tts.get_tts_engine()
-        if not tts_engine.available:
+        if not tts_engine.available or (config.TTS_BACKEND != "sapi" and not (tts_engine.phonon and tts_engine.phonon.ready)):
             await asyncio.to_thread(tts_engine.load)
         if not tts_engine.available:
+            log.error("speak_text failed: TTS engine is not available")
             return
 
+        # Ensure AudioPlayer playback is running on the voice client
+        vc = call.voice_client
+        if vc and hasattr(vc, "is_connected") and vc.is_connected() and not vc.is_playing():
+            log.info("VoiceClient player is inactive; restarting AudioPlayer on %s", getattr(getattr(vc, 'channel', None), 'name', 'voice'))
+            def _play_after(err: Exception | None) -> None:
+                if err:
+                    log.error("AudioPlayer stopped with error: %s", err)
+            try:
+                vc.play(call.source, after=_play_after)
+            except Exception as play_err:
+                log.warning("Could not start vc.play: %s", play_err)
+
         call.is_speaking = True
+        log.info("Synthesizing and streaming %d chunk(s) for guild %s via %s...", len(chunk_list), guild_id, tts_engine.backend)
         try:
             for chunk in chunk_list:
                 if call.cancel.is_set():
+                    log.info("speak_text cancelled by interrupt flag.")
                     break
                 try:
-                    audio = await asyncio.to_thread(
-                        tts_engine.synthesize, chunk, call.cancel
-                    )
-                    if audio is None or len(audio) == 0 or call.cancel.is_set():
-                        break
-                    pcm_bytes = to_discord_pcm(audio)
-                    call.source.feed(pcm_bytes)
+                    if hasattr(tts_engine, "stream_pcm") and tts_engine.phonon and tts_engine.phonon.ready:
+                        def _stream_to_discord(text_part: str) -> None:
+                            fed = 0
+                            for sub_audio in tts_engine.stream_pcm(text_part, cancel=call.cancel):
+                                if call.cancel.is_set():
+                                    break
+                                pcm_bytes = to_discord_pcm(sub_audio)
+                                if pcm_bytes:
+                                    call.source.feed(pcm_bytes)
+                                    fed += len(pcm_bytes)
+                            log.info("Streamed %d PCM bytes to Discord for chunk %r", fed, text_part[:40])
+                        await asyncio.to_thread(_stream_to_discord, chunk)
+                    else:
+                        audio = await asyncio.to_thread(
+                            tts_engine.synthesize, chunk, call.cancel
+                        )
+                        if audio is None or len(audio) == 0 or call.cancel.is_set():
+                            break
+                        pcm_bytes = to_discord_pcm(audio)
+                        call.source.feed(pcm_bytes)
+                        log.info("Synthesized and fed %d PCM bytes to Discord for chunk %r", len(pcm_bytes), chunk[:40])
                 except Exception as e:
                     log.exception("Error synthesizing Discord speech chunk: %s", e)
                     break

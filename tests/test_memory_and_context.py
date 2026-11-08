@@ -1,7 +1,6 @@
 """Characterization tests for token budget context building and keyword memory search in memory.py."""
 
 import pytest
-from memory import MAX_CONTEXT_TOKENS, MAX_RETRIEVED_MEMORIES, MemoryStore
 
 
 class FakeTokenizer:

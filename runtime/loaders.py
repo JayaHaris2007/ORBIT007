@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 import warnings
 from typing import Any
@@ -24,7 +25,6 @@ def get_gpu_memory_gib() -> tuple[float, float]:
         return 0.0, 0.0
     try:
         allocated = torch.cuda.memory_allocated(0) / (1024**3)
-        reserved = torch.cuda.memory_reserved(0) / (1024**3)
         total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         free = total - allocated
         return round(allocated, 2), round(free, 2)
@@ -32,112 +32,28 @@ def get_gpu_memory_gib() -> tuple[float, float]:
         return 0.0, 0.0
 
 
-def check_local_model_files(model_dir: str) -> None:
-    """Verify local model weights exist before offline loading."""
-    offline = os.environ.get("HF_HUB_OFFLINE") == "1"
-    if not os.path.exists(model_dir):
-        msg = (
-            f"Local model directory '{model_dir}' not found. "
-            "If downloading for the first time, start with SPIDEY_ALLOW_HUB=1."
-        )
-        if offline:
-            raise FileNotFoundError(msg)
-        log.warning(msg)
+def load_phonon_eager() -> tuple[Any, float]:
+    """Load the CPU-only Phonon engine and retain SAPI as a Windows fallback."""
+    from voice import config
+    from voice.phonon_engine import PhononEngine
+    from voice.tts import TTSService, WindowsSapiEngine
 
-
-def load_qwen_eager(
-    model_dir: str,
-    gpu_limit: str = "5GiB",
-    cpu_limit: str = "6GiB",
-    generation_lock: Any | None = None,
-) -> tuple[Any, Any, float]:
-    """Load Qwen3-4B in 4-bit NF4 quantization once, warm up, and register."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-
-    t0 = time.perf_counter()
-    check_local_model_files(model_dir)
-
-    log.info("Loading Qwen tokenizer from %s...", model_dir)
-    tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
-
-    cuda_available = torch.cuda.is_available()
-    if cuda_available:
-        from transformers import BitsAndBytesConfig
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,
-        )
-        model_kwargs = {
-            "dtype": "auto",
-            "device_map": "auto",
-            "max_memory": {0: gpu_limit, "cpu": cpu_limit},
-            "quantization_config": quantization_config,
-        }
-    else:
-        model_kwargs = {
-            "device_map": "cpu",
-            "dtype": torch.float32,
-        }
-
-    log.info("Loading Qwen causal language model (cuda=%s)...", cuda_available)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_dir,
-        low_cpu_mem_usage=True,
-        local_files_only=True,
-        **model_kwargs,
-    )
-
-    # 1-token warm-up to compile CUDA graph and initialize buffers
-    log.info("Warming up Qwen model (max_new_tokens=1)...")
-    prompt = "Hello"
-    inputs = tokenizer([prompt], return_tensors="pt")
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
-    if generation_lock is not None:
-        with generation_lock:
-            with torch.inference_mode():
-                model.generate(**inputs, max_new_tokens=1)
-    else:
-        with torch.inference_mode():
-            model.generate(**inputs, max_new_tokens=1)
-
-    load_time = time.perf_counter() - t0
-    alloc_gib, _ = get_gpu_memory_gib()
-    log.info(
-        "Qwen LLM ready in %.2fs (device=%s, VRAM allocated=%.2f GiB).",
-        load_time,
-        getattr(model, "device", "cpu"),
-        alloc_gib,
-    )
-    return model, tokenizer, load_time
-
-
-def load_omnivoice_eager(generation_lock: Any | None = None) -> tuple[Any, float]:
-    """Load OmniVoice once, warm up with one short synthesis, and register."""
-    from voice.tts import OmniVoiceEngine
-
-    t0 = time.perf_counter()
-    engine = OmniVoiceEngine(shared_lock=generation_lock)
-    engine._load_eager()
-
-    if not engine.available:
-        raise RuntimeError(f"OmniVoice failed to initialize: {engine.error}")
-
-    # Warm up with one short phrase (discard audio)
-    log.info("Warming up OmniVoice TTS engine...")
-    _ = engine.synthesize("Hi.")
-
-    load_time = time.perf_counter() - t0
-    alloc_gib, _ = get_gpu_memory_gib()
-    log.info(
-        "OmniVoice TTS ready in %.2fs (device=%s, dtype=%s, VRAM allocated=%.2f GiB).",
-        load_time,
-        engine.device,
-        engine.dtype,
-        alloc_gib,
-    )
-    return engine, load_time
+    started = time.perf_counter()
+    sapi = WindowsSapiEngine()
+    phonon = None
+    if config.TTS_BACKEND != "sapi":
+        try:
+            phonon = PhononEngine(
+                model=config.PHONON_MODEL,
+                lang=config.PHONON_LANG,
+                quant=config.PHONON_QUANT,
+                voice=config.PHONON_VOICE,
+            ).load()
+        except Exception as err:
+            log.exception("Phonon TTS failed to initialize; using SAPI fallback: %s", err)
+    service = TTSService(phonon=phonon, sapi=sapi)
+    load_time = time.perf_counter() - started
+    return service, load_time
 
 
 def load_embedder_eager(
@@ -171,41 +87,140 @@ def load_stt_eager() -> Any:
     return stt_engine
 
 
+def check_ollama_running(url: str = "http://127.0.0.1:11434", model_name: str = "qwen3.5:4b", timeout: float = 2.0) -> bool:
+    """Check if Ollama server is running and has the requested model available."""
+    import json
+    import urllib.request
+    try:
+        req = urllib.request.Request(f"{url.rstrip('/')}/api/tags", headers={"User-Agent": "spidey/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            models = [m.get("name", "") for m in data.get("models", [])]
+            return any(
+                m == model_name
+                or m == f"{model_name}:latest"
+                or (":" not in model_name and m.startswith(f"{model_name}:"))
+                or m.split(":")[0] == model_name.split(":")[0]
+                for m in models
+            )
+    except Exception:
+        return False
+
+
+
+def wait_for_ollama(url: str, model_name: str, max_wait: float = 10.0, poll_interval: float = 1.5) -> bool:
+    """
+    Wait up to `max_wait` seconds for Ollama to become reachable at server startup.
+    Polls every `poll_interval` seconds. Returns True if Ollama is up and the model
+    is available within the window, False otherwise (caller falls back to local Qwen).
+    """
+    deadline = time.perf_counter() + max_wait
+    while time.perf_counter() < deadline:
+        if check_ollama_running(url, model_name, timeout=2.0):
+            return True
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_interval, remaining))
+    return False
+
+
 def load_all_models_eager(
-    qwen_dir: str,
-    gpu_limit: str = "5GiB",
-    cpu_limit: str = "6GiB",
     generation_lock: Any | None = None,
 ) -> None:
     """Load all models sequentially once at server startup. Never crashes the server."""
     log.info("=== BEGINNING SINGLE-PROCESS EAGER MODEL INITIALIZATION ===")
     total_start = time.perf_counter()
 
-    # 1. Qwen LLM
-    try:
-        model, tokenizer, load_time = load_qwen_eager(
-            qwen_dir, gpu_limit=gpu_limit, cpu_limit=cpu_limit, generation_lock=generation_lock
-        )
-        REGISTRY.register("llm", (model, tokenizer), metrics={"load_time": load_time})
-    except Exception as err:
-        log.exception("Eager load failed for Qwen LLM: %s", err)
-        REGISTRY.fail("llm", err)
+    # 1. LLM (Ollama only)
+    ollama_url = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434").strip()
+    ollama_model = os.environ.get("OLLAMA_MODEL", "qwen3.5:4b").strip()
 
-    # 2. OmniVoice TTS
+    log.info("Checking for Ollama at %s (model=%s)...", ollama_url, ollama_model)
+    ollama_active = wait_for_ollama(ollama_url, ollama_model, max_wait=10.0)
+
+    if ollama_active:
+        log.info(
+            "Detected running Ollama at %s with model '%s'. Using Ollama backend.",
+            ollama_url,
+            ollama_model,
+        )
+        REGISTRY.register(
+            "llm",
+            "ollama",
+            metrics={"backend": "ollama", "model": ollama_model, "load_time": 0.0, "device": "ollama"},
+        )
+        try:
+            import app
+            app._ollama_ready = True
+        except Exception:
+            pass
+    else:
+        err_msg = (
+            f"Ollama is not running at {ollama_url} or model '{ollama_model}' not found. "
+            f"Start Ollama with `ollama serve` and pull the model with `ollama pull {ollama_model}`."
+        )
+        log.warning(err_msg)
+        REGISTRY.fail("llm", err_msg)
+        try:
+            import app
+            app._ollama_ready = False
+        except Exception:
+            pass
+
+    # 2. Phonon TTS (CPU) with Windows SAPI fallback
     try:
-        tts_engine, load_time = load_omnivoice_eager(generation_lock=generation_lock)
-        REGISTRY.register("tts", tts_engine, metrics={"load_time": load_time})
+        tts_engine, load_time = load_phonon_eager()
+        if os.environ.get("TTS_BACKEND", "phonon").strip().lower() != "sapi" and tts_engine.phonon is None:
+            REGISTRY.fail("tts", tts_engine.error or "Phonon failed to initialize.")
+            log.warning("Windows SAPI fallback remains available after Phonon failure.")
+        else:
+            REGISTRY.register(
+                "tts",
+                tts_engine,
+                metrics={
+                    "backend": tts_engine.backend,
+                    "voice": tts_engine.voice,
+                    "sample_rate": 24000,
+                    "load_time": load_time,
+                    "device": tts_engine.device,
+                },
+            )
+            if tts_engine.phonon is not None and hasattr(tts_engine.phonon, "warm_up"):
+                threading.Thread(
+                    target=tts_engine.phonon.warm_up,
+                    daemon=True,
+                    name="phonon-warmup",
+                ).start()
     except Exception as err:
-        log.exception("Eager load failed for OmniVoice TTS: %s", err)
+        log.exception("Eager load failed for Phonon TTS: %s", err)
         REGISTRY.fail("tts", err)
 
     # 3. SentenceTransformer Embedder
-    try:
-        embedder, load_time = load_embedder_eager()
-        REGISTRY.register("embedder", embedder, metrics={"load_time": load_time})
-    except Exception as err:
-        log.exception("Eager load failed for SentenceTransformer: %s", err)
-        REGISTRY.fail("embedder", err)
+    #
+    # This stack also loads native torch/torchaudio components. On Windows,
+    # an incompatible binary can terminate the process before Python can
+    # handle an exception, so keep it opt-in.
+    eager_embedder = os.environ.get("SPIDEY_EAGER_EMBEDDER", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not eager_embedder:
+        message = (
+            "SentenceTransformer eager loading is disabled. Set "
+            "SPIDEY_EAGER_EMBEDDER=1 after verifying the installed torch build."
+        )
+        log.warning(message)
+        REGISTRY.fail("embedder", message)
+    else:
+        try:
+            embedder, load_time = load_embedder_eager()
+            REGISTRY.register("embedder", embedder, metrics={"load_time": load_time})
+        except Exception as err:
+            log.exception("Eager load failed for SentenceTransformer: %s", err)
+            REGISTRY.fail("embedder", err)
 
     # 4. STT Engine
     try:

@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import logging
 import sqlite3
+
+LOGGER = logging.getLogger("spidey.memory")
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -35,9 +38,15 @@ class MemoryStore:
 
     @contextmanager
     def connect(self):
-        connection = sqlite3.connect(self.database_path)
+        connection = sqlite3.connect(
+            self.database_path,
+            check_same_thread=False,
+            timeout=30.0,
+        )
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA busy_timeout = 30000")
         try:
             yield connection
             connection.commit()
@@ -161,6 +170,14 @@ class MemoryStore:
                   );
                 """
             )
+            session_columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(external_sessions)")
+            }
+            if "last_notification_id" not in session_columns:
+                connection.execute(
+                    "ALTER TABLE external_sessions ADD COLUMN last_notification_id INTEGER NOT NULL DEFAULT 0"
+                )
             reminder_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(reminders)")
@@ -289,6 +306,21 @@ class MemoryStore:
                 (provider, external_user_id, chat["id"], now, now),
             )
         return chat
+
+    def get_external_last_notification_id(self, chat_id: str) -> int:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT last_notification_id FROM external_sessions WHERE conversation_id = ?",
+                (chat_id,),
+            ).fetchone()
+        return int(row["last_notification_id"]) if row and row["last_notification_id"] is not None else 0
+
+    def set_external_last_notification_id(self, chat_id: str, last_id: int) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE external_sessions SET last_notification_id = ? WHERE conversation_id = ?",
+                (last_id, chat_id),
+            )
 
     def get_external_session(self, chat_id: str) -> dict[str, Any] | None:
         with self.connect() as connection:
@@ -721,6 +753,25 @@ class MemoryStore:
             ).fetchone()
         return row is not None
 
+    def set_reminder_active(
+        self, reminder_id: str, active: bool, run_at: str | None = None
+    ) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            if run_at is not None:
+                connection.execute(
+                    "UPDATE reminders SET active = ?, run_at = ? WHERE id = ?",
+                    (1 if active else 0, run_at, reminder_id),
+                )
+            else:
+                connection.execute(
+                    "UPDATE reminders SET active = ? WHERE id = ?",
+                    (1 if active else 0, reminder_id),
+                )
+            row = connection.execute(
+                "SELECT * FROM reminders WHERE id = ?", (reminder_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
     def cancel_reminder(self, reminder_id: str) -> bool:
         with self.connect() as connection:
             result = connection.execute(
@@ -825,7 +876,7 @@ class MemoryStore:
         except Exception:
             pass
         if not self._embedding_warning_printed:
-            print("Semantic memory model unavailable; using keyword retrieval.")
+            LOGGER.info("Semantic memory model unavailable; using keyword retrieval.")
             self._embedding_warning_printed = True
         return None
 

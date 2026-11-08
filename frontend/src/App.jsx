@@ -12,10 +12,12 @@ import Learning from './pages/Learning';
 import ErrorBoundary from './components/ErrorBoundary';
 import AssistantSidebar from './components/AssistantSidebar';
 import ParallaxStage from './components/ParallaxStage';
+import ScrollProgressLine from './components/ScrollProgressLine';
 
 const AppLayout = ({ children }) => {
     const { theme } = useTheme();
     return <div className={`app-theme-${theme} min-h-screen bg-background text-text font-sans flex flex-col md:flex-row app-frame`}>
+        <ScrollProgressLine />
         <Navbar />
         <div className="app-main-shell flex-1 md:ml-64 min-w-0 transition-all duration-300 flex flex-col">
             <ParallaxStage>
@@ -41,6 +43,9 @@ function App() {
                         <Route path="/learning" element={<AppLayout><ErrorBoundary><Learning /></ErrorBoundary></AppLayout>} />
                         <Route path="/analytics" element={<AppLayout><Analytics /></AppLayout>} />
                         <Route path="/settings" element={<AppLayout><Settings /></AppLayout>} />
+                        <Route path="/tasks" element={<Navigate to="/todos" replace />} />
+                        <Route path="/memories" element={<Navigate to="/reminders" replace />} />
+                        <Route path="/notes" element={<Navigate to="/reminders" replace />} />
                         <Route path="*" element={<Navigate to="/dashboard" replace />} />
                     </Routes>
                 </Router>

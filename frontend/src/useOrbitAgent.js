@@ -6,7 +6,7 @@ const getAuthHeaders = (extra = {}) => ({
   ...(ORBIT_TOKEN ? { 'x-orbit-token': ORBIT_TOKEN } : {}),
 });
 
-export function useOrbitAgent() {
+export function useOrbitAgent(activeChatIdProp) {
   const [messages, setMessages] = useState([]);
   const [reminders, setReminders] = useState([]);
   const [connected, setConnected] = useState(false);
@@ -16,6 +16,76 @@ export function useOrbitAgent() {
   const audioRef = useRef(null);
   const audioCtxRef = useRef(null);
   const mediaStreamRef = useRef(null);
+
+  // Helper to read current active chat id
+  const getActiveChatId = useCallback(() => {
+    if (activeChatIdProp && typeof activeChatIdProp === 'string' && activeChatIdProp.trim()) {
+      return activeChatIdProp.trim();
+    }
+    try {
+      const stored = localStorage.getItem('spidey_active_chat_id') || localStorage.getItem('jarvis_active_chat_id');
+      if (stored && typeof stored === 'string' && stored.trim()) {
+        return stored.trim();
+      }
+    } catch {
+      // ignore
+    }
+    return 'default';
+  }, [activeChatIdProp]);
+
+  const [activeChatId, setActiveChatId] = useState(getActiveChatId);
+  const activeChatIdRef = useRef(activeChatId);
+
+  useEffect(() => {
+    const current = getActiveChatId();
+    setActiveChatId(current);
+    activeChatIdRef.current = current;
+  }, [getActiveChatId]);
+
+  // Sync activeChatId with storage, chat deletion, or data reset events
+  useEffect(() => {
+    const handleStorageOrReset = (e) => {
+      const deletedId = e?.detail?.deletedId;
+      if (deletedId && activeChatIdRef.current === deletedId) {
+        try {
+          localStorage.removeItem('spidey_active_chat_id');
+          localStorage.removeItem('jarvis_active_chat_id');
+        } catch {
+      // ignore
+    }
+        setActiveChatId('default');
+        activeChatIdRef.current = 'default';
+        return;
+      }
+      const updated = getActiveChatId();
+      setActiveChatId(updated);
+      activeChatIdRef.current = updated;
+    };
+
+    window.addEventListener('storage', handleStorageOrReset);
+    window.addEventListener('orbit:chat_deleted', handleStorageOrReset);
+    window.addEventListener('orbit:data_reset', handleStorageOrReset);
+
+    return () => {
+      window.removeEventListener('storage', handleStorageOrReset);
+      window.removeEventListener('orbit:chat_deleted', handleStorageOrReset);
+      window.removeEventListener('orbit:data_reset', handleStorageOrReset);
+    };
+  }, [getActiveChatId]);
+
+  // Switch chat over WebSocket and rehydrate history when activeChatId changes
+  useEffect(() => {
+    activeChatIdRef.current = activeChatId;
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'set_chat', chat_id: activeChatId }));
+    }
+    fetch(`/api/history?session_id=${encodeURIComponent(activeChatId)}`, { headers: getAuthHeaders() })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.messages) setMessages(data.messages);
+      })
+      .catch((err) => console.warn('Failed to fetch history for chat:', err));
+  }, [activeChatId]);
 
   const isSpeakEnabled = () => {
     try {
@@ -58,9 +128,10 @@ export function useOrbitAgent() {
   // Initial DB hydration via REST
   const fetchInitialData = useCallback(async () => {
     try {
+      const currentCid = activeChatIdRef.current || 'default';
       const [remRes, histRes] = await Promise.all([
         fetch('/api/reminders', { headers: getAuthHeaders() }),
-        fetch('/api/history', { headers: getAuthHeaders() }),
+        fetch(`/api/history?session_id=${encodeURIComponent(currentCid)}`, { headers: getAuthHeaders() }),
       ]);
       if (remRes.ok) {
         const remData = await remRes.json();
@@ -97,6 +168,10 @@ export function useOrbitAgent() {
           return;
         }
         setConnected(true);
+        // Send set_chat right after socket opens with current active chat id
+        const currentCid = activeChatIdRef.current || 'default';
+        ws.send(JSON.stringify({ type: 'set_chat', chat_id: currentCid }));
+
         pingTimer = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'ping' }));
@@ -111,6 +186,8 @@ export function useOrbitAgent() {
           if (data.type === 'connected') {
             if (data.reminders) setReminders(data.reminders);
             if (data.history) setMessages(data.history);
+          } else if (data.type === 'chat_set') {
+            if (data.history) setMessages(data.history);
           } else if (data.type === 'status') {
             if (data.state === 'thinking') setIsLoading(true);
           } else if (data.type === 'pong') {
@@ -118,7 +195,9 @@ export function useOrbitAgent() {
           } else if (data.type === 'transcript') {
             setMessages((prev) => [...prev, { role: 'user', content: data.text }]);
           } else if (data.type === 'reminder_alert') {
-            if (data.text) {
+            const currentCid = activeChatIdRef.current || 'default';
+            // Only append in-chat reminder text when alert chat_id matches active chat
+            if (data.text && (!data.chat_id || data.chat_id === currentCid)) {
               setMessages((prev) => [...prev, { role: 'assistant', content: `⏰ Reminder: ${data.text}` }]);
             }
             if (data.reminders) setReminders(data.reminders);
@@ -133,6 +212,18 @@ export function useOrbitAgent() {
             }
             if (data.reminders) setReminders(data.reminders);
             if (data.audio_url && isSpeakEnabled()) playAudio(data.audio_url);
+            if (Array.isArray(data.ui_actions)) {
+              for (const action of data.ui_actions) {
+                if (action && action.type === 'refresh') {
+                  window.dispatchEvent(new CustomEvent('orbit:refresh', { detail: { sections: action.sections || [] } }));
+                } else if (action && action.type === 'navigate' && action.route) {
+                  const allowed = ['/dashboard', '/habits', '/todos', '/reminders', '/learning', '/analytics', '/settings'];
+                  if (allowed.includes(action.route)) {
+                    window.dispatchEvent(new CustomEvent('orbit:navigate', { detail: { route: action.route, page: action.page } }));
+                  }
+                }
+              }
+            }
           } else if (data.type === 'error') {
             setIsLoading(false);
             console.error('Agent error:', data.error);
@@ -173,8 +264,10 @@ export function useOrbitAgent() {
     setIsLoading(true);
     setMessages((prev) => [...prev, { role: 'user', content: text }]);
 
+    const currentCid = activeChatIdRef.current || 'default';
+
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ message: text }));
+      wsRef.current.send(JSON.stringify({ message: text, chat_id: currentCid }));
       return;
     }
 
@@ -182,7 +275,7 @@ export function useOrbitAgent() {
       const res = await fetch('/api/chat', {
         method: 'POST',
         headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({ message: text, session_id: currentCid, chat_id: currentCid }),
       });
       const data = await res.json();
       if (data.history) setMessages(data.history);
@@ -234,17 +327,20 @@ export function useOrbitAgent() {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       try {
         wsRef.current.send(JSON.stringify({ type: 'end_audio' }));
-      } catch {}
+      } catch {
+      // ignore
+    }
     }
     setIsRecording(false);
   }, []);
 
   // Reminder CRUD helpers
   const addReminder = useCallback(async (title, remind_at) => {
+    const currentCid = activeChatIdRef.current || 'default';
     const res = await fetch('/api/reminders', {
       method: 'POST',
       headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ title, remind_at }),
+      body: JSON.stringify({ title, remind_at, chat_id: currentCid }),
     });
     if (res.ok) {
       const data = await res.json();
@@ -252,17 +348,27 @@ export function useOrbitAgent() {
     }
   }, []);
 
-  const toggleReminder = useCallback(async (id, completed) => {
+  const completeReminder = useCallback(async (id, completed = true, remind_at = undefined) => {
+    const body = { completed: Boolean(completed) };
+    if (remind_at) body.remind_at = remind_at;
     const res = await fetch(`/api/reminders/${id}`, {
       method: 'PATCH',
       headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ completed }),
+      body: JSON.stringify(body),
     });
     if (res.ok) {
       const data = await res.json();
       setReminders(data.reminders || []);
+      return { ok: true, data };
+    } else {
+      const errData = await res.json().catch(() => ({}));
+      const msg = errData.detail || 'Failed to update reminder';
+      console.warn('completeReminder failed:', msg);
+      return { ok: false, error: msg };
     }
   }, []);
+
+  const toggleReminder = completeReminder;
 
   const deleteReminder = useCallback(async (id) => {
     const res = await fetch(`/api/reminders/${id}`, {
@@ -285,10 +391,10 @@ export function useOrbitAgent() {
     startVoiceCapture,
     stopVoiceCapture,
     addReminder,
+    completeReminder,
     toggleReminder,
     deleteReminder,
   };
 }
 
 export default useOrbitAgent;
-

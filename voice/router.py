@@ -12,7 +12,7 @@ from typing import Any, Callable, Coroutine
 
 import os
 import secrets
-from fastapi import APIRouter, Body, HTTPException, Request, Response, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Body, HTTPException, Response, WebSocket, WebSocketDisconnect
 
 API_TOKEN = os.environ.get("ORBIT_API_TOKEN", "").strip()
 
@@ -24,7 +24,6 @@ async def ws_authorized(ws: WebSocket) -> bool:
     if not ok:
         await ws.close(code=1008)
     return ok
-from fastapi.responses import JSONResponse
 
 from . import config, text_clean, sentences, session, tts, stt
 
@@ -112,6 +111,10 @@ def get_voice_settings() -> dict[str, Any]:
         "engine_ready": engine_ready,
         "is_loading": getattr(engine, "is_loading", False),
         "available": engine.available or engine_ready,
+        "backend": getattr(engine, "backend", "sapi"),
+        "voice": getattr(engine, "voice", ""),
+        "sample_rate": config.SAMPLE_RATE,
+        "load_time": getattr(engine, "load_time", 0.0),
         "device": engine.device,
         "dtype": engine.dtype,
         "error": safe_error,
@@ -156,7 +159,7 @@ def synthesize_tts_chunk(payload: dict[str, Any] = Body(...)) -> Response:
         engine.load()
 
     if not engine.available:
-        raise HTTPException(503, "OmniVoice TTS engine is not available.")
+        raise HTTPException(503, "TTS engine is not available.")
 
     audio_array = engine.synthesize(cleaned)
     if audio_array is None or len(audio_array) == 0:
@@ -178,6 +181,8 @@ def stop_voice_turn(payload: dict[str, Any] | None = Body(default=None)) -> dict
         session_id = str(payload["session_id"])
     voice_session = session.get_voice_session(session_id)
     voice_session.reset()
+    if session_id == "default":
+        session.reset_all_sessions()
     return {"status": "stopped"}
 
 

@@ -95,6 +95,18 @@ const AssistantSidebar = () => {
         if (route && location.pathname !== route) navigate(route);
     }, [navigate, location.pathname]);
 
+    useEffect(() => {
+        const handleOrbitNav = (e) => {
+            const targetRoute = e.detail?.route;
+            const allowed = ['/dashboard', '/habits', '/todos', '/reminders', '/learning', '/analytics', '/settings'];
+            if (targetRoute && allowed.includes(targetRoute) && location.pathname !== targetRoute) {
+                navigate(targetRoute);
+            }
+        };
+        window.addEventListener('orbit:navigate', handleOrbitNav);
+        return () => window.removeEventListener('orbit:navigate', handleOrbitNav);
+    }, [navigate, location.pathname]);
+
     // Load one conversation and make it the active one.
     const openChat = useCallback(async (id) => {
         const seq = requestSeq.current + 1;
@@ -217,6 +229,7 @@ const AssistantSidebar = () => {
     const selectChat = (id) => {
         setHistoryOpen(false);
         setConfirmingId('');
+            window.dispatchEvent(new CustomEvent('orbit:chat_deleted', { detail: { deletedId: id } }));
         if (id !== chatId) openChat(id);
     };
 
@@ -263,6 +276,18 @@ const AssistantSidebar = () => {
             if (activeChatRef.current !== chatId) return;
             setMessages(data.messages || []);
             if (data.navigate) goToPage(data.navigate);
+            if (Array.isArray(data.ui_actions)) {
+                for (const action of data.ui_actions) {
+                    if (action && action.type === 'refresh') {
+                        window.dispatchEvent(new CustomEvent('orbit:refresh', { detail: { sections: action.sections || [] } }));
+                    } else if (action && action.type === 'navigate' && action.route) {
+                        const allowed = ['/dashboard', '/habits', '/todos', '/reminders', '/learning', '/analytics', '/settings'];
+                        if (allowed.includes(action.route) && location.pathname !== action.route) {
+                            navigate(action.route);
+                        }
+                    }
+                }
+            }
             if (data.response && voice.speakEnabled) {
                 voice.speak(data.response);
             }
@@ -318,29 +343,32 @@ const AssistantSidebar = () => {
                     }
                     setOpen((current) => !current);
                 }}
-                className={`workspace-toggle group fixed right-0 top-1/2 -translate-y-1/2 z-40 flex-col items-center gap-2 rounded-l-2xl rounded-r-none border-t border-l border-b border-orange-500/40 border-r-0 bg-gradient-to-l from-[#080706] via-[#120e0b] to-[#1c140e] py-5 px-3 md:px-3.5 shadow-[-5px_0_28px_rgba(255,106,26,0.28),inset_1px_0_0_rgba(255,140,40,0.35)] transition-all duration-300 hover:border-orange-400 hover:shadow-[-8px_0_36px_rgba(255,106,26,0.5)] hover:from-[#0e0a07] hover:to-[#241a12] hover:-translate-x-1.5 active:translate-x-0 xl:hidden cursor-pointer ${open ? 'hidden' : 'flex'}`}
+                className={`workspace-toggle group fixed right-0 top-1/2 -translate-y-1/2 z-40 flex-col items-center gap-0 rounded-l-2xl rounded-r-none border-t border-l border-b border-orange-500/40 border-r-0 bg-gradient-to-l from-[#080706] via-[#120e0b] to-[#1c140e] py-4 px-[10px] shadow-[-6px_0_32px_rgba(255,106,26,0.32),inset_1px_0_0_rgba(255,140,40,0.4)] xl:hidden cursor-pointer transition-all duration-300 hover:px-[14px] hover:shadow-[-8px_0_38px_rgba(255,106,26,0.5)] ${open ? 'hidden' : 'flex'}`}
                 aria-expanded={open}
                 aria-label={minimized ? 'Restore S.P.I.D.E.Y panel' : open ? 'Close S.P.I.D.E.Y panel' : 'Open S.P.I.D.E.Y panel'}
                 title={minimized ? 'Restore S.P.I.D.E.Y' : 'Open S.P.I.D.E.Y'}
             >
-                <ChevronLeft size={16} className="text-orange-400/80 transition-all duration-300 group-hover:-translate-x-1 group-hover:text-orange-300" />
-                <Bot size={19} className="text-orange-400 transition-transform duration-300 group-hover:scale-110 mb-1" />
-                <div className="flex flex-col items-center font-mono text-xs md:text-sm font-black leading-none text-orange-100 transition-colors group-hover:text-white select-none">
-                    <span>S</span>
-                    <span className="text-[9px] text-orange-400/70 my-[2px]">•</span>
-                    <span>P</span>
-                    <span className="text-[9px] text-orange-400/70 my-[2px]">•</span>
-                    <span>I</span>
-                    <span className="text-[9px] text-orange-400/70 my-[2px]">•</span>
-                    <span>D</span>
-                    <span className="text-[9px] text-orange-400/70 my-[2px]">•</span>
-                    <span>E</span>
-                    <span className="text-[9px] text-orange-400/70 my-[2px]">•</span>
-                    <span>Y</span>
+                {/* Chevron */}
+                <ChevronLeft size={13} className="text-orange-400/50 mb-2 transition-all duration-300 group-hover:text-orange-300 group-hover:-translate-x-0.5" />
+                {/* Bot icon */}
+                <Bot size={17} className="text-orange-400 mb-3 transition-all duration-300 group-hover:text-orange-300 group-hover:drop-shadow-[0_0_10px_rgba(255,106,26,0.9)]" />
+                {/* S.P.I.D.E.Y letters with thin line separators */}
+                <div className="flex flex-col items-center select-none">
+                    {['S','P','I','D','E','Y'].map((letter, i) => (
+                        <div key={letter} className="flex flex-col items-center">
+                            <span className="font-mono font-black text-[13px] leading-none text-orange-100 transition-all duration-300 group-hover:text-white group-hover:drop-shadow-[0_0_8px_rgba(255,106,26,0.75)]">
+                                {letter}
+                            </span>
+                            {i < 5 && (
+                                <span className="block w-[1px] h-[5px] my-[3px] bg-gradient-to-b from-orange-500/55 to-transparent rounded-full transition-all duration-300 group-hover:from-orange-400/85 group-hover:h-[6px]" />
+                            )}
+                        </div>
+                    ))}
                 </div>
-                <span className="relative flex h-2.5 w-2.5 mt-1.5">
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-orange-400 opacity-75"></span>
-                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-orange-500 shadow-[0_0_8px_rgba(255,106,26,0.8)]"></span>
+                {/* Live status dot */}
+                <span className="relative flex h-2.5 w-2.5 mt-3">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-orange-400 opacity-70"></span>
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-orange-500 shadow-[0_0_8px_rgba(255,106,26,0.85)] transition-all duration-300 group-hover:shadow-[0_0_14px_rgba(255,106,26,1)]"></span>
                 </span>
             </button>
             {open && <button type="button" className="workspace-backdrop fixed inset-0 z-40 bg-black/60 xl:hidden" aria-label="Close S.P.I.D.E.Y panel" onClick={() => setOpen(false)} />}
@@ -439,7 +467,7 @@ const AssistantSidebar = () => {
 
                 {orbitMode ? (
                     <div className="flex-1 min-h-0 flex flex-col">
-                        <OrbitAgentView />
+                        <OrbitAgentView activeChatId={chatId} />
                     </div>
                 ) : (
                     <>

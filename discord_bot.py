@@ -20,7 +20,7 @@ from discord.ext import commands
 
 import app
 from voice.discord_voice import get_discord_voice_manager
-from db import create_reminder, list_reminders, save_message, get_recent_messages, init_db
+
 
 
 LOGGER = logging.getLogger("spidey.discord")
@@ -30,12 +30,20 @@ DISCORD_NOTIFICATION_POLL_SECONDS = 5
 DISCORD_LOCK_PORT = 47653
 
 
+_single_instance_guard: socket.socket | None = None
+
+
 def _acquire_single_instance() -> socket.socket:
     """Refuse to start when another bot process already owns the lock port."""
+    global _single_instance_guard
+    if _single_instance_guard is not None:
+        return _single_instance_guard
     guard = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    guard.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         guard.bind(("127.0.0.1", DISCORD_LOCK_PORT))
         guard.listen(1)
+        _single_instance_guard = guard
     except OSError as error:
         guard.close()
         raise SystemExit(
@@ -43,6 +51,16 @@ def _acquire_single_instance() -> socket.socket:
             "starting a new one."
         ) from error
     return guard
+
+
+def _release_single_instance() -> None:
+    global _single_instance_guard
+    if _single_instance_guard is not None:
+        try:
+            _single_instance_guard.close()
+        except Exception as e:
+            LOGGER.warning("Error closing single-instance guard socket: %s", e)
+        _single_instance_guard = None
 
 
 def _parse_id_allowlist(name: str) -> set[int]:
@@ -60,10 +78,46 @@ def _parse_id_allowlist(name: str) -> set[int]:
 
 
 def _split_response(response: str) -> list[str]:
-    return [
-        response[index : index + DISCORD_MAX_MESSAGE_LENGTH]
-        for index in range(0, len(response), DISCORD_MAX_MESSAGE_LENGTH)
-    ] or ["I generated an empty response."]
+    response = response.strip()
+    if not response:
+        return ["I generated an empty response."]
+    if len(response) <= DISCORD_MAX_MESSAGE_LENGTH:
+        return [response]
+
+    chunks: list[str] = []
+    max_len = 1900
+    remaining = response
+
+    while remaining:
+        if len(remaining) <= max_len:
+            chunks.append(remaining)
+            break
+
+        window = remaining[:max_len]
+        para_pos = window.rfind("\n\n")
+        if para_pos > max_len // 3:
+            split_pos = para_pos + 2
+        else:
+            newline_pos = window.rfind("\n")
+            if newline_pos > max_len // 3:
+                split_pos = newline_pos + 1
+            else:
+                sent_pos = window.rfind(". ")
+                if sent_pos > max_len // 3:
+                    split_pos = sent_pos + 2
+                else:
+                    space_pos = window.rfind(" ")
+                    if space_pos > max_len // 3:
+                        split_pos = space_pos + 1
+                    else:
+                        split_pos = max_len
+
+        chunk = remaining[:split_pos].strip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[split_pos:].strip()
+
+    return chunks or ["I generated an empty response."]
 
 
 # The local model sometimes writes keycap numbers with stray combining marks,
@@ -101,7 +155,6 @@ class SpideyBot(commands.Bot):
         self.pending_call_reminders: dict[tuple[int, int], dict[str, Any]] = {}
 
     async def setup_hook(self) -> None:
-        init_db()
         for chat in app.memory_store.list_external_chats(DISCORD_PROVIDER):
             self.track_chat(chat["id"], str(chat["external_user_id"]))
         app._restore_reminders(provider=DISCORD_PROVIDER)
@@ -121,174 +174,211 @@ class SpideyBot(commands.Bot):
         if chat_id in self.discord_chats:
             return
         self.discord_chats[chat_id] = external_user_id
-        self.last_notification_id[chat_id] = app.memory_store.latest_notification_id(
-            chat_id
-        )
+        stored_last_id = app.memory_store.get_external_last_notification_id(chat_id)
+        self.last_notification_id[chat_id] = stored_last_id
 
     async def deliver_notifications(self) -> None:
         """Poll the shared database and deliver reminders to server channels or DMs."""
         await self.wait_until_ready()
         while not self.is_closed():
-            await asyncio.sleep(DISCORD_NOTIFICATION_POLL_SECONDS)
-            for chat_id, external_user_id in list(self.discord_chats.items()):
-                last_id = self.last_notification_id.get(chat_id, 0)
-                try:
-                    notifications = await asyncio.to_thread(
-                        app.memory_store.list_notifications, chat_id, last_id
-                    )
-                except Exception:
-                    LOGGER.exception(
-                        "Could not read notifications for chat %s.", chat_id
-                    )
-                    continue
-                for notification in notifications:
-                    content = notification["content"].strip()
-                    if not content:
-                        self.last_notification_id[chat_id] = notification["id"]
+            try:
+                await asyncio.sleep(DISCORD_NOTIFICATION_POLL_SECONDS)
+                for chat_id, external_user_id in list(self.discord_chats.items()):
+                    last_id = self.last_notification_id.get(chat_id, 0)
+                    try:
+                        notifications = await asyncio.to_thread(
+                            app.memory_store.list_notifications, chat_id, last_id
+                        )
+                    except Exception:
+                        LOGGER.exception(
+                            "Could not read notifications for chat %s.", chat_id
+                        )
                         continue
+                    for notification in notifications:
+                        content = notification["content"].strip()
+                        if not content:
+                            self.last_notification_id[chat_id] = notification["id"]
+                            app.memory_store.set_external_last_notification_id(chat_id, notification["id"])
+                            continue
 
-                    reminder_id = notification.get("reminder_id")
-                    target = None
-                    if reminder_id:
-                        try:
-                            target = await asyncio.to_thread(
-                                app.memory_store.get_reminder_delivery_target,
-                                reminder_id,
-                            )
-                        except Exception as e:
-                            LOGGER.warning("Could not fetch reminder target for %s: %s", reminder_id, e)
-
-                    delivered = False
-                    if target and target.get("channel_id") and target.get("guild_id"):
-                        guild_id = target["guild_id"]
-                        channel_id = target["channel_id"]
-                        user_id = target["user_id"]
-
-                        channel = self.get_channel(channel_id)
-                        if channel is None:
+                        reminder_id = notification.get("reminder_id")
+                        target = None
+                        if reminder_id:
                             try:
-                                channel = await self.fetch_channel(channel_id)
-                            except Exception:
-                                channel = None
+                                target = await asyncio.to_thread(
+                                    app.memory_store.get_reminder_delivery_target,
+                                    reminder_id,
+                                )
+                            except Exception as e:
+                                LOGGER.warning("Could not fetch reminder target for %s: %s", reminder_id, e)
 
-                        guild = self.get_guild(guild_id)
-                        if guild is None:
-                            try:
-                                guild = await self.fetch_guild(guild_id)
-                            except Exception:
-                                guild = None
+                        delivered = False  # noqa: must be before all branches
+                        if target and target.get("channel_id") and target.get("guild_id"):
+                            guild_id = target["guild_id"]
+                            channel_id = target["channel_id"]
+                            user_id = target["user_id"]
 
-                        member = None
-                        if guild is not None:
-                            member = guild.get_member(user_id)
-                            if member is None:
+                            channel = self.get_channel(channel_id)
+                            if channel is None:
                                 try:
-                                    member = await guild.fetch_member(user_id)
-                                except Exception:
-                                    member = None
+                                    channel = await self.fetch_channel(channel_id)
+                                except Exception as err:
+                                    LOGGER.warning("Could not fetch channel %s: %s", channel_id, err)
+                                    channel = None
 
-                        if channel is not None and isinstance(
-                            channel, (discord.TextChannel, discord.Thread)
-                        ):
-                            try:
-                                voice_mgr = get_discord_voice_manager()
-                                user_vc = getattr(getattr(member, "voice", None), "channel", None) if member else None
+                            guild = self.get_guild(guild_id)
+                            if guild is None:
+                                try:
+                                    guild = await self.fetch_guild(guild_id)
+                                except Exception as err:
+                                    LOGGER.warning("Could not fetch guild %s: %s", guild_id, err)
+                                    guild = None
 
-                                if user_vc is not None:
-                                    # Case A: User is currently on call in user_vc
-                                    call = voice_mgr.get_call(guild_id)
-                                    if not call or getattr(getattr(call, "voice_client", None), "channel", None) != user_vc:
-                                        await voice_mgr.join_voice_channel(user_vc, channel_id, guild_id=guild_id)
+                            member = None
+                            if guild is not None:
+                                member = guild.get_member(user_id)
+                                if member is None:
+                                    try:
+                                        member = await guild.fetch_member(user_id)
+                                    except Exception as err:
+                                        LOGGER.warning("Could not fetch member %s in guild %s: %s", user_id, guild_id, err)
+                                        member = None
 
-                                    asyncio.create_task(
-                                        voice_mgr.speak_text(guild_id, user_id, content)
-                                    )
-
-                                    user_mention = f"<@{user_id}>"
-                                    vc_name = getattr(user_vc, "name", "voice")
-                                    server_msg = f"{user_mention} {content} *(Spoken in 🔊 {vc_name})*"
-                                    for chunk in _split_response(server_msg):
-                                        await channel.send(chunk)
-                                else:
-                                    # Case B: User is NOT currently on call ("if i am not on call")
-                                    target_vc = None
-                                    if guild and getattr(guild, "voice_channels", None):
-                                        for vc in guild.voice_channels:
-                                            if "general" in vc.name.lower():
-                                                target_vc = vc
-                                                break
-                                        if target_vc is None and guild.voice_channels:
-                                            target_vc = guild.voice_channels[0]
-
-                                    if target_vc is not None:
-                                        # Join target voice channel to call the user
-                                        await voice_mgr.join_voice_channel(target_vc, channel_id, guild_id=guild_id)
-
-                                        # Register pending reminder so when user hops in, Spidey speaks
-                                        self.pending_call_reminders[(guild_id, user_id)] = {
-                                            "content": content,
-                                            "voice_channel_id": target_vc.id,
-                                            "text_channel_id": channel_id,
-                                            "created_at": time.perf_counter(),
-                                        }
-
-                                        # Speak reminder in voice channel
+                            if channel is not None and isinstance(
+                                channel, (discord.TextChannel, discord.Thread)
+                            ):
+                                try:
+                                    voice_mgr = get_discord_voice_manager()
+                                    user_vc = getattr(getattr(member, "voice", None), "channel", None) if member else None
+    
+                                    if user_vc is not None:
+                                        # Case A: User is currently on call in user_vc
+                                        call = voice_mgr.get_call(guild_id)
+                                        if not call or getattr(getattr(call, "voice_client", None), "channel", None) != user_vc:
+                                            await voice_mgr.join_voice_channel(user_vc, channel_id, guild_id=guild_id)
+    
                                         asyncio.create_task(
                                             voice_mgr.speak_text(guild_id, user_id, content)
                                         )
-
-                                        # Send incoming call alert in text channel with join link
+    
                                         user_mention = f"<@{user_id}>"
-                                        call_link = f"https://discord.com/channels/{guild_id}/{target_vc.id}"
-                                        server_msg = (
-                                            f"📞 {user_mention} **Incoming Call — Reminder!**\n"
-                                            f"{content}\n"
-                                            f"👉 I joined **{target_vc.name}** to call you — [Click here to join the call]({call_link})!"
-                                        )
+                                        vc_name = getattr(user_vc, "name", "voice")
+                                        server_msg = f"{user_mention} {content} *(Spoken in 🔊 {vc_name})*"
                                         for chunk in _split_response(server_msg):
                                             await channel.send(chunk)
-
-                                        # Also send a quick DM ring alert in case user has Discord minimized
-                                        guild_name = getattr(guild, "name", "Server")
-                                        dm_msg = (
-                                            f"📞 **S.P.I.D.E.Y is calling you in {guild_name} — Reminder!**\n"
-                                            f"{content}\n"
-                                            f"👉 Join the call in **{target_vc.name}**: {call_link}"
-                                        )
-                                        try:
-                                            await self.send_dm(int(user_id), dm_msg)
-                                        except Exception:
-                                            pass
-
-                                        # Schedule auto-leave after 2 minutes if user doesn't join
-                                        async def _auto_leave_if_unjoined(gid: int, uid: int, vcid: int) -> None:
-                                            await asyncio.sleep(120)
-                                            pending_check = self.pending_call_reminders.get((gid, uid))
-                                            if pending_check and pending_check.get("voice_channel_id") == vcid:
-                                                self.pending_call_reminders.pop((gid, uid), None)
-                                                c = voice_mgr.get_call(gid)
-                                                if c and getattr(getattr(c, "voice_client", None), "channel", None) and c.voice_client.channel.id == vcid:
-                                                    members = getattr(c.voice_client.channel, "members", [])
-                                                    human_members = [m for m in members if not getattr(m, "bot", False)]
-                                                    if not human_members:
-                                                        await voice_mgr.leave_call(gid)
-                                                        LOGGER.info("Auto-left voice channel %s after 2 min unanswered reminder call.", vcid)
-
-                                        asyncio.create_task(_auto_leave_if_unjoined(guild_id, user_id, target_vc.id))
                                     else:
-                                        user_mention = f"<@{user_id}>"
-                                        server_msg = f"{user_mention} {content}"
-                                        for chunk in _split_response(server_msg):
-                                            await channel.send(chunk)
-
+                                        # Case B: User is NOT currently on call ("if i am not on call")
+                                        target_vc = None
+                                        if guild and getattr(guild, "voice_channels", None):
+                                            for vc in guild.voice_channels:
+                                                if "general" in vc.name.lower():
+                                                    target_vc = vc
+                                                    break
+                                            if target_vc is None and guild.voice_channels:
+                                                target_vc = guild.voice_channels[0]
+    
+                                        if target_vc is not None:
+                                            # Join target voice channel to call the user
+                                            await voice_mgr.join_voice_channel(target_vc, channel_id, guild_id=guild_id)
+    
+                                            # Register pending reminder so when user hops in, Spidey speaks
+                                            self.pending_call_reminders[(guild_id, user_id)] = {
+                                                "content": content,
+                                                "voice_channel_id": target_vc.id,
+                                                "text_channel_id": channel_id,
+                                                "created_at": time.perf_counter(),
+                                            }
+    
+                                            # Speak reminder in voice channel
+                                            asyncio.create_task(
+                                                voice_mgr.speak_text(guild_id, user_id, content)
+                                            )
+    
+                                            # Send incoming call alert in text channel with join link
+                                            user_mention = f"<@{user_id}>"
+                                            call_link = f"https://discord.com/channels/{guild_id}/{target_vc.id}"
+                                            server_msg = (
+                                                f"📞 {user_mention} **Incoming Call — Reminder!**\n"
+                                                f"{content}\n"
+                                                f"👉 I joined **{target_vc.name}** to call you — [Click here to join the call]({call_link})!"
+                                            )
+                                            for chunk in _split_response(server_msg):
+                                                await channel.send(chunk)
+    
+                                            # Also send a quick DM ring alert in case user has Discord minimized
+                                            guild_name = getattr(guild, "name", "Server")
+                                            dm_msg = (
+                                                f"📞 **S.P.I.D.E.Y is calling you in {guild_name} — Reminder!**\n"
+                                                f"{content}\n"
+                                                f"👉 Join the call in **{target_vc.name}**: {call_link}"
+                                            )
+                                            try:
+                                                await self.send_dm(int(user_id), dm_msg)
+                                            except Exception as e:
+                                                LOGGER.warning("Could not send reminder DM alert to user %s: %s", user_id, e)
+    
+                                            # Schedule auto-leave after 2 minutes if user doesn't join
+                                            async def _auto_leave_if_unjoined(gid: int, uid: int, vcid: int) -> None:
+                                                await asyncio.sleep(120)
+                                                pending_check = self.pending_call_reminders.get((gid, uid))
+                                                if pending_check and pending_check.get("voice_channel_id") == vcid:
+                                                    self.pending_call_reminders.pop((gid, uid), None)
+                                                    c = voice_mgr.get_call(gid)
+                                                    if c and getattr(getattr(c, "voice_client", None), "channel", None) and c.voice_client.channel.id == vcid:
+                                                        members = getattr(c.voice_client.channel, "members", [])
+                                                        human_members = [m for m in members if not getattr(m, "bot", False)]
+                                                        if not human_members:
+                                                            await voice_mgr.leave_call(gid)
+                                                            LOGGER.info("Auto-left voice channel %s after 2 min unanswered reminder call.", vcid)
+    
+                                            asyncio.create_task(_auto_leave_if_unjoined(guild_id, user_id, target_vc.id))
+                                        else:
+                                            user_mention = f"<@{user_id}>"
+                                            server_msg = f"{user_mention} {content}"
+                                            for chunk in _split_response(server_msg):
+                                                await channel.send(chunk)
+    
+                                    self.last_notification_id[chat_id] = notification["id"]
+                                    app.memory_store.set_external_last_notification_id(chat_id, notification["id"])
+                                    LOGGER.info(
+                                        "Delivered notification %s to server channel %s for user %s (voice handled).",
+                                        notification["id"],
+                                        channel_id,
+                                        user_id,
+                                    )
+                                    delivered = True
+                                    try:
+                                        await asyncio.to_thread(
+                                            app.memory_store.add_message,
+                                            chat_id,
+                                            "assistant",
+                                            content,
+                                        )
+                                    except Exception as e:
+                                        LOGGER.warning("Could not record assistant reminder message for chat %s: %s", chat_id, e)
+                                except discord.Forbidden:
+                                    LOGGER.warning(
+                                        "Cannot send notification %s to channel %s (forbidden); falling back to DM.",
+                                        notification["id"],
+                                        channel_id,
+                                    )
+                                except Exception:
+                                    LOGGER.exception(
+                                        "Could not deliver notification %s to channel %s; falling back to DM.",
+                                        notification["id"],
+                                        channel_id,
+                                    )
+    
+                        if not delivered:
+                            try:
+                                await self.send_dm(int(external_user_id), content)
                                 self.last_notification_id[chat_id] = notification["id"]
+                                app.memory_store.set_external_last_notification_id(chat_id, notification["id"])
                                 LOGGER.info(
-                                    "Delivered notification %s to server channel %s for user %s (voice handled).",
+                                    "Delivered notification %s to user %s via DM.",
                                     notification["id"],
-                                    channel_id,
-                                    user_id,
+                                    external_user_id,
                                 )
-                                delivered = True
                                 try:
                                     await asyncio.to_thread(
                                         app.memory_store.add_message,
@@ -296,51 +386,25 @@ class SpideyBot(commands.Bot):
                                         "assistant",
                                         content,
                                     )
-                                except Exception:
-                                    pass
+                                except Exception as e:
+                                    LOGGER.warning("Could not record assistant reminder message for chat %s: %s", chat_id, e)
                             except discord.Forbidden:
+                                self.last_notification_id[chat_id] = notification["id"]
+                                app.memory_store.set_external_last_notification_id(chat_id, notification["id"])
                                 LOGGER.warning(
-                                    "Cannot send notification %s to channel %s (forbidden); falling back to DM.",
+                                    "Cannot DM notification %s to user %s; DMs are closed.",
                                     notification["id"],
-                                    channel_id,
+                                    external_user_id,
                                 )
                             except Exception:
                                 LOGGER.exception(
-                                    "Could not deliver notification %s to channel %s; falling back to DM.",
+                                    "Could not deliver notification %s.",
                                     notification["id"],
-                                    channel_id,
                                 )
-
-                    if not delivered:
-                        try:
-                            await self.send_dm(int(external_user_id), content)
-                            self.last_notification_id[chat_id] = notification["id"]
-                            LOGGER.info(
-                                "Delivered notification %s to user %s via DM.",
-                                notification["id"],
-                                external_user_id,
-                            )
-                            try:
-                                await asyncio.to_thread(
-                                    app.memory_store.add_message,
-                                    chat_id,
-                                    "assistant",
-                                    content,
-                                )
-                            except Exception:
-                                pass
-                        except discord.Forbidden:
-                            self.last_notification_id[chat_id] = notification["id"]
-                            LOGGER.warning(
-                                "Cannot DM notification %s to user %s; DMs are closed.",
-                                notification["id"],
-                                external_user_id,
-                            )
-                        except Exception:
-                            LOGGER.exception(
-                                "Could not deliver notification %s.",
-                                notification["id"],
-                            )
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                LOGGER.exception("Unexpected error in deliver_notifications loop.")
 
     async def send_dm(self, user_id: int, content: str) -> None:
         user = self.get_user(user_id)
@@ -359,7 +423,21 @@ class SpideyBot(commands.Bot):
         before: discord.VoiceState,
         after: discord.VoiceState,
     ) -> None:
-        """When a user joins a voice channel where Spidey is waiting for a reminder, speak it."""
+        """Handle auto-leaving empty channels and speaking pending call reminders."""
+        voice_mgr = get_discord_voice_manager()
+
+        # Check if Spidey is in before.channel and all humans have left
+        if before.channel is not None and (after.channel is None or before.channel.id != after.channel.id):
+            call = voice_mgr.get_call(before.channel.guild.id)
+            if call and getattr(getattr(call, "voice_client", None), "channel", None) and call.voice_client.channel.id == before.channel.id:
+                humans = [m for m in before.channel.members if not getattr(m, "bot", False)]
+                if not humans:
+                    LOGGER.info("All human members left voice channel %s. Leaving call.", before.channel.name)
+                    try:
+                        await voice_mgr.leave_call(before.channel.guild.id)
+                    except Exception as err:
+                        LOGGER.warning("Error leaving empty voice channel: %s", err)
+
         if getattr(member, "bot", False) or not getattr(after, "channel", None):
             return
 
@@ -369,7 +447,6 @@ class SpideyBot(commands.Bot):
             # Check within 5 minutes
             if time.perf_counter() - pending.get("created_at", 0) < 300:
                 self.pending_call_reminders.pop(key, None)
-                voice_mgr = get_discord_voice_manager()
                 if voice_mgr.is_call_active(member.guild.id):
                     content = pending["content"]
                     LOGGER.info(
@@ -463,21 +540,19 @@ class SpideyBot(commands.Bot):
         chat_id = chat["id"]
         self.track_chat(chat_id, str(message.author.id))
 
-        # Check direct reminder creation intent via shared DB
-        tool_notice = app.parse_and_execute_reminder_intent(prompt)
-        if tool_notice:
-            save_message("user", prompt, session_id=f"discord_{chat_id}")
-            save_message("assistant", tool_notice, session_id=f"discord_{chat_id}")
-            app.memory_store.add_message(chat_id, "user", prompt)
-            app.memory_store.add_message(chat_id, "assistant", tool_notice)
-            await message.reply(tool_notice)
-            return
-
-        save_message("user", prompt, session_id=f"discord_{chat_id}")
-
         existing_reminders = {
             r["id"] for r in app.memory_store.list_reminders(active_only=True)
         }
+
+        handled, conf_reply, _ = await asyncio.to_thread(
+            app.confirmation_mgr.check_and_handle, chat_id, prompt, app.agent_deps
+        )
+        if handled:
+            app.memory_store.add_message(chat_id, "user", prompt)
+            app.memory_store.add_message(chat_id, "assistant", conf_reply)
+            for chunk in _split_response(conf_reply):
+                await message.reply(chunk)
+            return
 
         try:
             command = await asyncio.to_thread(
@@ -508,12 +583,6 @@ class SpideyBot(commands.Bot):
                     guild_id,
                     message.author.id,
                 )
-            for r in new_reminders:
-                try:
-                    create_reminder(r.get("text") or r.get("title", ""), r.get("run_at") or r.get("remind_at", ""))
-                except Exception:
-                    pass
-            save_message("assistant", response, session_id=f"discord_{chat_id}")
             app.memory_store.add_message(chat_id, "user", prompt)
             app.memory_store.add_message(chat_id, "assistant", response)
             for chunk in _split_response(response):
@@ -531,16 +600,18 @@ class SpideyBot(commands.Bot):
             async with message.channel.typing():
                 await asyncio.to_thread(app.ensure_model_loaded)
                 context = app.memory_store.build_context(
-                    chat_id, app.tokenizer, prompt
+                    chat_id, None, prompt
                 )
                 memories = app._memories_for_prompt(prompt)
-                response = await asyncio.to_thread(
-                    app.generate_response,
+                agent_res = await asyncio.to_thread(
+                    app.respond_with_tools,
                     prompt,
-                    app._token_budget(prompt),
+                    chat_id,
                     context,
                     memories,
+                    "discord",
                 )
+                response = agent_res.reply
         except ValueError as error:
             await message.reply(str(error))
             return
@@ -549,8 +620,22 @@ class SpideyBot(commands.Bot):
             await message.reply("I could not generate a response right now.")
             return
 
+        new_reminders = [
+            r for r in app.memory_store.list_reminders(active_only=True)
+            if r["id"] not in existing_reminders and r.get("chat_id") == chat_id
+        ]
+        for r in new_reminders:
+            channel_id = message.channel.id if message.guild is not None else None
+            guild_id = message.guild.id if message.guild is not None else None
+            await asyncio.to_thread(
+                app.memory_store.save_reminder_delivery_target,
+                r["id"],
+                channel_id,
+                guild_id,
+                message.author.id,
+            )
+
         response = _clean_reply_text(response)
-        save_message("assistant", response, session_id=f"discord_{chat_id}")
         app.memory_store.add_message(chat_id, "assistant", response)
         for chunk in _split_response(response):
             await message.reply(chunk)
@@ -638,16 +723,18 @@ class SpideyBot(commands.Bot):
             async with typing_ctx:
                 await asyncio.to_thread(app.ensure_model_loaded)
                 context = app.memory_store.build_context(
-                    chat_id, app.tokenizer, prompt
+                    chat_id, None, prompt
                 )
                 memories = app._memories_for_prompt(prompt)
-                response = await asyncio.to_thread(
-                    app.generate_response,
+                agent_res = await asyncio.to_thread(
+                    app.respond_with_tools,
                     prompt,
-                    app._token_budget(prompt),
+                    chat_id,
                     context,
                     memories,
+                    "discord",
                 )
+                response = agent_res.reply
         except ValueError as error:
             if text_channel is not None:
                 await text_channel.send(str(error))
@@ -657,6 +744,19 @@ class SpideyBot(commands.Bot):
             if text_channel is not None:
                 await text_channel.send("I could not generate a response right now.")
             return
+
+        new_reminders = [
+            r for r in app.memory_store.list_reminders(active_only=True)
+            if r["id"] not in existing_reminders and r.get("chat_id") == chat_id
+        ]
+        for r in new_reminders:
+            await asyncio.to_thread(
+                app.memory_store.save_reminder_delivery_target,
+                r["id"],
+                text_channel_id,
+                guild_id,
+                user.id,
+            )
 
         response = _clean_reply_text(response)
         app.memory_store.add_message(chat_id, "assistant", response)
@@ -823,6 +923,10 @@ async def start_discord_bot_in_process(token: str) -> None:
     if _discord_task is not None and not _discord_task.done():
         LOGGER.info("Discord bot is already running in-process.")
         return
+    try:
+        _acquire_single_instance()
+    except Exception as err:
+        LOGGER.warning("Could not acquire Discord single instance lock: %s", err)
     LOGGER.info("Starting Discord bot in-process with FastAPI server...")
     _discord_task = asyncio.create_task(bot.start(token))
 
@@ -830,6 +934,13 @@ async def start_discord_bot_in_process(token: str) -> None:
 async def stop_discord_bot_in_process() -> None:
     """Stop the in-process Discord bot gracefully."""
     global _discord_task
+    try:
+        voice_mgr = get_discord_voice_manager()
+        for gid in list(voice_mgr.calls.keys()):
+            await voice_mgr.leave_call(gid)
+    except Exception as e:
+        LOGGER.warning("Error leaving active voice calls on bot shutdown: %s", e)
+
     if bot.is_ready():
         LOGGER.info("Closing in-process Discord bot connection...")
         try:
@@ -839,9 +950,12 @@ async def stop_discord_bot_in_process() -> None:
     if _discord_task is not None:
         try:
             await _discord_task
-        except (asyncio.CancelledError, Exception):
+        except asyncio.CancelledError:
             pass
+        except Exception as e:
+            LOGGER.warning("Error waiting for Discord bot task completion: %s", e)
         _discord_task = None
+    _release_single_instance()
 
 
 def main() -> None:
@@ -861,17 +975,22 @@ def main() -> None:
         import urllib.request
         req = urllib.request.urlopen("http://127.0.0.1:8000/api/health", timeout=1.5)
         if req.status == 200:
-            print("\n[INFO] S.P.I.D.E.Y server is already running on port 8000 with the in-process Discord bot.")
-            print("To avoid duplicate model loading in VRAM, the bot runs inside the server process.")
-            print("No separate discord_bot.py process is needed. Exiting.\n")
+            LOGGER.info(
+                "S.P.I.D.E.Y server is already running on port 8000 with the in-process Discord bot. "
+                "To avoid duplicate model loading in VRAM, the bot runs inside the server process. "
+                "No separate discord_bot.py process is needed. Exiting."
+            )
             return
-    except Exception:
-        pass
+    except Exception as err:
+        LOGGER.debug("Server health check bypassed: %s", err)
 
     from runtime.guard import acquire_model_process_lock
     _model_guard = acquire_model_process_lock()  # noqa: F841
     guard = _acquire_single_instance()  # noqa: F841 - held for the process lifetime
-    bot.run(token)
+    try:
+        bot.run(token)
+    finally:
+        _release_single_instance()
 
 
 if __name__ == "__main__":

@@ -1,11 +1,9 @@
 """Characterization tests for chat endpoint, task creation/completion, and intent parser."""
 
-import pytest
 from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 
 import app
-from tests.test_memory_and_context import FakeTokenizer
 
 
 def test_characterization_task_create_via_chat(temp_db):
@@ -59,7 +57,6 @@ def test_characterization_llm_chat_fallback(temp_db, monkeypatch):
 
     mock_gen = MagicMock(return_value="Mocked LLM reply for characterization test.")
     monkeypatch.setattr(app, "generate_response", mock_gen)
-    monkeypatch.setattr(app, "tokenizer", FakeTokenizer())
 
     response = client.post(
         "/api/generate",
@@ -67,6 +64,6 @@ def test_characterization_llm_chat_fallback(temp_db, monkeypatch):
     )
     assert response.status_code == 200
     data = response.json()
-    assert data["provider"] == "local-qwen"
+    assert data["provider"] == "ollama"
     assert data["response"] == "Mocked LLM reply for characterization test."
     mock_gen.assert_called_once()

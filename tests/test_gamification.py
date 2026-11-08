@@ -1,8 +1,7 @@
 """Characterization tests for gamification, XP, 70% threshold, and streak logic in memory.py."""
 
 from datetime import datetime, timedelta
-import pytest
-from memory import LOCAL_TIMEZONE, MemoryStore
+from memory import LOCAL_TIMEZONE
 
 
 def test_initial_gamification_state(temp_db):

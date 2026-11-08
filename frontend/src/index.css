@@ -142,22 +142,38 @@ input:-webkit-autofill:active {
   caret-color: white;
 }
 
-/* Scrollbar */
+/* Scrollbar - S.P.I.D.E.Y Orange Theme */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #ff6a1a rgba(14, 12, 10, 0.85);
+}
+
 ::-webkit-scrollbar {
-  width: 8px;
+  width: 7px;
+  height: 7px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #0a0a0a;
+  background: rgba(14, 12, 10, 0.85);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #333;
-  border-radius: 4px;
+  background: linear-gradient(180deg, #ff8c28 0%, #ff6a1a 50%, #d9480f 100%);
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 138, 76, 0.3);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #555;
+  background: linear-gradient(180deg, #ffa24b 0%, #ff7b2b 50%, #ea580c 100%);
+  border-color: rgba(255, 170, 110, 0.6);
+}
+
+::-webkit-scrollbar-thumb:active {
+  background: #ff8c28;
+}
+
+::-webkit-scrollbar-corner {
+  background: rgba(14, 12, 10, 0.9);
 }
 
 /* S.P.I.D.E.Y orange, ink and ivory interface */
@@ -217,6 +233,31 @@ button:active:not(:disabled) { transform: translateY(1px); }
 .workspace-tool-card summary span { display: flex; align-items: center; gap: 0.55rem; }
 .workspace-tool-card summary small { color: #9b9189; font-size: 0.65rem; font-weight: 500; }
 .workspace-tool-card[open] summary svg { transform: rotate(180deg); }
+
+
+/* S.P.I.D.E.Y Right Docked Tab - Smooth, stable hover and zero layout jump */
+.workspace-toggle {
+  position: fixed;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%) !important;
+  transition: padding-left 220ms cubic-bezier(0.16, 1, 0.3, 1),
+              border-color 220ms ease,
+              box-shadow 220ms ease,
+              background 220ms ease !important;
+}
+
+.workspace-toggle:hover {
+  padding-left: 1.05rem !important;
+  border-color: rgba(255, 140, 40, 0.85) !important;
+  box-shadow: -8px 0 35px rgba(255, 106, 26, 0.55), inset 1.5px 0 0 rgba(255, 160, 60, 0.6) !important;
+  background: linear-gradient(to left, #0d0a08, #18110b, #26180e) !important;
+}
+
+.workspace-toggle:active {
+  transform: translateY(-50%) !important;
+  opacity: 0.95;
+}
 
 @media (min-width: 1280px) {
   .workspace-sidebar { transform: none; }

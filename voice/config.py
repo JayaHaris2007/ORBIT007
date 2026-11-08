@@ -68,18 +68,13 @@ def purge_voice_tmp() -> None:
 
 
 # TTS Configuration
-TTS_DEVICE = os.environ.get("TTS_DEVICE", "cuda:0").strip() or "cuda:0"
-TTS_DTYPE = os.environ.get("TTS_DTYPE", "float16").strip() or "float16"
+TTS_BACKEND = os.environ.get("TTS_BACKEND", "phonon").strip().lower() or "phonon"
+PHONON_MODEL = os.environ.get("PHONON_MODEL", "hf://gradium/phonon-31m-en").strip()
+PHONON_QUANT = os.environ.get("PHONON_QUANT", "q8").strip() or "q8"
+PHONON_LANG = os.environ.get("PHONON_LANG", "en").strip() or "en"
+PHONON_VOICE = os.environ.get("SPIDEY_TTS_VOICE", "Easton").strip() or "Easton"
 TTS_CPU_THREADS = _int("TTS_CPU_THREADS", 4)
 TTS_SHARE_QWEN_LOCK = _bool("TTS_SHARE_QWEN_LOCK", False)
-TTS_MODEL_ID = os.environ.get("TTS_MODEL_ID", "k2-fsa/OmniVoice").strip() or "k2-fsa/OmniVoice"
-
-# Voice design configuration (descriptive prompt style)
-TTS_INSTRUCT = os.environ.get(
-    "TTS_INSTRUCT", "male, low pitch, young adult, american accent"
-).strip()
-TTS_STEPS = _int("TTS_STEPS", 16)
-TTS_SPEED = _float("TTS_SPEED", 1.0, minimum=0.2)
 MAX_SENTENCE_CHARS = _int("VOICE_MAX_SENTENCE_CHARS", 220)
 SAMPLE_RATE = 24000
 
@@ -102,4 +97,3 @@ DISCORD_VOICE_ALLOWED_USER_IDS = _parse_id_allowlist(
 ) or _parse_id_allowlist("AI_DISCORD_ALLOWED_USER_IDS")
 DISCORD_VOICE_MAX_CHARS = _int("DISCORD_VOICE_MAX_CHARS", 500)
 DISCORD_CALL_IDLE_TIMEOUT_SECONDS = _int("DISCORD_CALL_IDLE_TIMEOUT_SECONDS", 600)
-

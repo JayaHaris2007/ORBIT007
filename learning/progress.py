@@ -313,7 +313,7 @@ def roadmap_summaries() -> list[dict[str, Any]]:
                     "topic_count": total,
                     "completed_count": done,
                     "in_progress_count": counts["active"] or 0,
-                    "completion_percent": round(done * 100 / total) if total else 0,
+                    "completion_percent": round(done * 100 / total) if (total and total > 0) else 0,
                     "next_topic": next_hint,
                 }
             )
@@ -414,7 +414,7 @@ def overall_progress() -> dict[str, Any]:
         "topic_count": total,
         "completed_topics": done,
         "in_progress_topics": totals["active"] or 0,
-        "completion_percent": round(done * 100 / total) if total else 0,
+        "completion_percent": round(done * 100 / total) if (total and total > 0) else 0,
         "per_roadmap": per_roadmap,
     }
 
@@ -490,6 +490,13 @@ def update_task_link(
         if topic is None:
             raise ValueError("Topic not found.")
         source = "manual" if topic_id else link["source"]
+        dup = connection.execute(
+            "SELECT id FROM task_topic_links WHERE task_id = ? AND topic_id = ? AND id != ?",
+            (link["task_id"], resolved_topic_id, link_id),
+        ).fetchone()
+        if dup is not None:
+            connection.execute("DELETE FROM task_topic_links WHERE id = ?", (link_id,))
+            link_id = dup["id"]
         connection.execute(
             "UPDATE task_topic_links SET state = ?, topic_id = ?, source = ? "
             "WHERE id = ?",
