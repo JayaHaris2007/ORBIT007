@@ -1,6 +1,5 @@
 """Characterization tests for chat endpoint, task creation/completion, and intent parser."""
 
-import pytest
 from unittest.mock import MagicMock
 from fastapi.testclient import TestClient
 

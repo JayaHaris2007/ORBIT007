@@ -148,7 +148,7 @@ The assistant was speaking twice simultaneously (duplicate playback) and with a 
 1. **Purged `audio.wav` Voice Cloning:**
    - Removed `TTS_REF_AUDIO` and `TTS_REF_TEXT` from `voice/config.py` and `voice/tts.py`.
    - Deleted `TTS/audio.wav` from disk.
-   - Configured `OmniVoiceEngine` exclusively with Voice Design prompt instruction (`TTS_INSTRUCT: "male, low pitch, young adult, american accent"`).
+   - Replaced the legacy neural TTS engine with CPU-only Gradium Phonon (`ptts`) and Windows SAPI fallback.
 2. **Prevented Duplicate Speech Playback:**
    - Fixed unmount reconnection leak in `useOrbitAgent.js` which previously left multiple WebSockets connected simultaneously in the background.
    - Ensured `useOrbitAgent.js` respects the global `spidey_speak_enabled` toggle before playing audio.
@@ -286,14 +286,14 @@ Added Ollama as an optional LLM backend while keeping the existing PyTorch / Hug
 ## 5. Complete Migration to Ollama-Only LLM Backend (Branch: `ollama-only`)
 
 ### Overview
-Completely removed the local Qwen-via-PyTorch/Transformers LLM execution path and associated bitsandbytes 4-bit configuration. S.P.I.D.E.Y now runs solely on Ollama (`qwen3.5:4b`), providing ~56.1 tokens/s generation speed, 100% GPU offloading, instant startup, and freeing up ~8.04 GB of disk space and ~2.5 GB of GPU VRAM. In-process PyTorch remains exclusively for OmniVoice TTS, Whisper STT, and sentence-transformers memory search.
+Completely removed the local Qwen-via-PyTorch/Transformers LLM execution path and associated bitsandbytes 4-bit configuration. S.P.I.D.E.Y now runs solely on Ollama (`qwen3.5:4b`), providing ~56.1 tokens/s generation speed, 100% GPU offloading, instant startup, and freeing up ~8.04 GB of disk space and ~2.5 GB of GPU VRAM. In-process PyTorch remains exclusively for Whisper STT and sentence-transformers memory search.
 
 ### Files Modified & Added (One line each)
 - **`.env.example`**: Removed `LLM_BACKEND` switch, activated and documented active `OLLAMA_*` settings, and added `OLLAMA_MAX_LOADED_MODELS=1` guidance.
 - **`README.md`**: Replaced all legacy HuggingFace/4-bit Transformers Qwen setup with Ollama installation (`qwen3.5:4b`), `start.bat`, and troubleshooting.
 - **`app.py`**: Removed PyTorch/Transformers LLM code (`AutoModelForCausalLM`, `AutoTokenizer`, `GPU_MEMORY_LIMIT`, `MODEL_DIR`, `model.generate`, etc.), migrated strictly to Ollama with `think: false`, fixed learning-fallback bug, updated `/api/health` with `llm_backend: ollama`, `llm_reachable: bool`, and `/api/ps` metrics.
 - **`discord_bot.py`**: Updated `memory_store.build_context` calls to pass `None` for tokenizer (relying on `len//4 + 8` character fallback).
-- **`requirements.gpu.txt`**: Removed `bitsandbytes`, preserved `accelerate` (required by `omnivoice`) and in-process voice/memory dependencies (`torch`, `transformers`, `sentence-transformers`, `omnivoice`, `SpeechRecognition`).
+- **`requirements.gpu.txt`**: Removed the legacy TTS dependency and added `ptts` for CPU Phonon, while preserving in-process voice/memory dependencies (`torch`, `transformers`, `sentence-transformers`, `SpeechRecognition`).
 - **`runtime/loaders.py`**: Removed `load_qwen_eager`, `check_local_model_files`, and eager Transformers loading; updated `load_all_models_eager` to check Ollama and register `llm` without crashing or loading local Qwen.
 - **`start.bat`**: Added pre-flight check for `ollama list | findstr "qwen3.5:4b"` with clear download instructions without blocking startup.
 - **`tests/test_characterization_chat.py`**: Removed `FakeTokenizer` monkeypatch to exercise `None` tokenizer fallback path.
@@ -320,7 +320,7 @@ Completely removed the local Qwen-via-PyTorch/Transformers LLM execution path an
 ### Live Verification Summary
 - **Direct Ollama Generation Speed:** **56.1 tokens/s** (exceeds the ~50 tokens/s baseline).
 - **Ollama VRAM Allocation (`size_vram`):** **2995.0 MB** (100% offloaded to GPU).
-- **In-process PyTorch VRAM:** **1.90 GiB** for OmniVoice TTS + STT + sentence-transformers (leaving 4.10 GiB free on 6 GB GPU).
+- **In-process PyTorch VRAM:** TTS no longer uses PyTorch; remaining usage is from STT and sentence-transformers.
 - **Warm Chat Latency:** **0.02s** (rules-first / warm LLM < 1.4s).
 - **Thinking Tag Suppression:** Verified `think: false` and regex stripping completely prevent `<think>` / "Thinking Process" leakage.
 - **Multi-turn Context:** Verified `None` tokenizer successfully preserves context across turns ("teal").
@@ -345,11 +345,11 @@ Remove-Item -Recurse -Force Models/LLM
 ```powershell
 pip uninstall -y bitsandbytes
 ```
-*(Do NOT uninstall `accelerate`, `torch`, `transformers`, `sentence-transformers`, `omnivoice`, or `SpeechRecognition` as they are still required by OmniVoice TTS, Whisper STT, and memory search).*
+*(Do NOT uninstall `accelerate`, `torch`, `transformers`, `sentence-transformers`, or `SpeechRecognition`; they remain required by Whisper STT and memory search.)*
 
 ### Assumptions & Risks
 - **Ollama Dependency:** Ollama must be running (`ollama serve`) with `qwen3.5:4b` pulled (`ollama pull qwen3.5:4b`). If Ollama is offline, the backend starts degraded without crashing, serving rules-first commands and returning friendly guidance for chat.
-- **Single Model in VRAM:** On 6 GB VRAM GPUs shared with OmniVoice TTS (~1.9 GB), recommend setting `OLLAMA_MAX_LOADED_MODELS=1` in the system environment to prevent Ollama from holding multiple models in VRAM simultaneously.
+- **Single Model in VRAM:** On 6 GB VRAM GPUs, recommend setting `OLLAMA_MAX_LOADED_MODELS=1` in the system environment to prevent Ollama from holding multiple models in VRAM simultaneously.
 
 ### Colab / Notebook Caveat
 `spidey_colab_basic.ipynb` and `spidey_api_bridge.py` were intentionally preserved without edits per ground rules. Running the backend directly in Google Colab will now require Ollama to be installed in the Colab instance (`curl -fsSL https://ollama.ai/install.sh | sh && ollama serve & ollama pull qwen3.5:4b`), as the Transformers Qwen LLM path has been completely removed. Lines in `spidey_colab_basic.ipynb` mentioning Qwen include cells downloading or loading `Qwen/Qwen2.5-Coder-3B-Instruct` or referencing `Models/LLM`.
@@ -414,4 +414,3 @@ Integrated native function/tool calling using Ollama and `qwen3.5:4b`, allowing 
 
 ### Production Recommendation
 Given 97.3% tool selection accuracy, 100% argument correctness, 0 safety violations, and 2.24s median latency, `ORBIT_TOOLS=1` is recommended as the active default for ORBIT007. Setting `ORBIT_TOOLS=0` in `.env` remains available to instantly restore the legacy plain-chat mode if desired.
-

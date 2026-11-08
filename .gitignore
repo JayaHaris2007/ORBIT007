@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 .Python
 .venv/
+.venv314/
 venv/
 env/
 ENV/
@@ -70,3 +71,7 @@ Thumbs.db
 *.user
 *.swp
 *.swo
+
+# Logs and Backups
+logs/
+backups/

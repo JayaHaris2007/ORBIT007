@@ -52,7 +52,7 @@ To manually observe recovery without server restart:
 - [ ] Bot connects and appears online in your Discord server.
 - [ ] Bot answers regular chat mentions.
 - [ ] Bot parses task and reminder commands from Discord messages.
-- [ ] Voice call receives a spoken audio reply via OmniVoice.
+- [ ] Voice call receives a spoken audio reply via Phonon or Windows SAPI.
 
 ## Untracked Local Weights To Delete
 

@@ -1,14 +1,13 @@
 import asyncio
 import json
 from datetime import datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
-import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 import app
-from memory import LOCAL_TIMEZONE, MemoryStore
+from memory import LOCAL_TIMEZONE
 
 
 def test_ws_set_chat_and_fallback(monkeypatch, temp_db):

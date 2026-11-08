@@ -111,9 +111,9 @@
   <rect x="617.005" y="438.1" width="320.566" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
   <text x="777.288" y="456.55" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Qwen3-4B (4-bit NF4 via BitsAndBytes on CUDA)</text>
 </g>
-<g class="node" data-id="TTS" data-label="OmniVoice Engine (float16 on CUDA / CPU fallback)" data-shape="rectangle">
+<g class="node" data-id="TTS" data-label="Phonon Engine (q8 on CPU / SAPI fallback)" data-shape="rectangle">
   <rect x="965.5709999999999" y="438.1" width="329.4579999999999" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
-  <text x="1130.3" y="456.55" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">OmniVoice Engine (float16 on CUDA / CPU fallback)</text>
+  <text x="1130.3" y="456.55" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Phonon Engine (q8 on CPU / SAPI fallback)</text>
 </g>
 <g class="node" data-id="Embedder" data-label="SentenceTransformer (all-MiniLM-L6-v2)" data-shape="rectangle">
   <rect x="305.48900000000003" y="438.1" width="283.51599999999996" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />

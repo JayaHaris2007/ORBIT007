@@ -5,10 +5,9 @@ from __future__ import annotations
 import asyncio
 import os
 import socket
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import WebSocketDisconnect
 
 from runtime.guard import acquire_model_process_lock, release_model_process_lock
 from runtime.models import ModelNotReady, ModelRegistry

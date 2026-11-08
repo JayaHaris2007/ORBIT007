@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import logging
 import sqlite3
+
+LOGGER = logging.getLogger("spidey.memory")
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone

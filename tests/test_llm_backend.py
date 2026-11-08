@@ -228,7 +228,7 @@ def test_eager_loads_ollama(monkeypatch):
     orig_metrics = dict(REGISTRY.metrics)
 
     monkeypatch.setattr(loaders, "wait_for_ollama", lambda *args, **kwargs: True)
-    monkeypatch.setattr(loaders, "load_omnivoice_eager", lambda *args, **kwargs: (MagicMock(), 1.0))
+    monkeypatch.setattr(loaders, "load_phonon_eager", lambda *args, **kwargs: (MagicMock(), 1.0))
     monkeypatch.setattr(loaders, "load_embedder_eager", lambda *args, **kwargs: (MagicMock(), 1.0))
     monkeypatch.setattr(loaders, "load_stt_eager", lambda *args, **kwargs: MagicMock())
 
@@ -254,7 +254,7 @@ def test_eager_fails_llm_when_ollama_unavailable(monkeypatch):
     orig_metrics = dict(REGISTRY.metrics)
 
     monkeypatch.setattr(loaders, "wait_for_ollama", lambda *args, **kwargs: False)
-    monkeypatch.setattr(loaders, "load_omnivoice_eager", lambda *args, **kwargs: (MagicMock(), 1.0))
+    monkeypatch.setattr(loaders, "load_phonon_eager", lambda *args, **kwargs: (MagicMock(), 1.0))
     monkeypatch.setattr(loaders, "load_embedder_eager", lambda *args, **kwargs: (MagicMock(), 1.0))
     monkeypatch.setattr(loaders, "load_stt_eager", lambda *args, **kwargs: MagicMock())
 

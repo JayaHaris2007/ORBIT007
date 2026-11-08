@@ -71,7 +71,7 @@ logging.getLogger("orbit007").info(
 import uvicorn
 import assistant_tone
 import json
-from typing import Any, Optional, Dict, List
+from typing import Optional
 from pydantic import BaseModel
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -3743,7 +3743,6 @@ def _handle_local_command(prompt: str, chat_id: str) -> tuple[str, str] | None:
     if web_query:
         return _web_search_reply(web_query)
 
-    normalized = _normalize_command(prompt)
     return None
 
 
@@ -3942,7 +3941,6 @@ def generate_response(
     max_new_tokens: int,
     messages: list[dict[str, str]] | None = None,
     memories: list[dict[str, Any]] | None = None,
-    on_token: Any | None = None,
 ) -> str:
     ensure_model_loaded()
     if not prompt.strip():
@@ -4608,7 +4606,7 @@ def run_existing_tts(text: str, output_path: str) -> None:
                     f.write(wav_bytes)
                 return
     except Exception as err:
-        logging.getLogger("orbit007").warning("OmniVoice TTS warning: %s", err)
+        logging.getLogger("orbit007").warning("TTS warning: %s", err)
 
     try:
         import wave, struct, math

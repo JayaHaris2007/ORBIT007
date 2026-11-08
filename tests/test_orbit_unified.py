@@ -3,14 +3,14 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 import app
-from memory import LOCAL_TIMEZONE, MemoryStore
+from memory import LOCAL_TIMEZONE
 
 
 def test_1_parse_reminder_time_and_recurrence():

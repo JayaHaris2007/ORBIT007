@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-    AudioQueue,
     fetchTTSAudio,
     fetchVoiceSettings,
+    getSharedAudioQueue,
     splitSentencesClient,
     stopVoiceTurn,
     updateVoiceSettings
@@ -20,29 +20,27 @@ export function useVoice() {
     const [isSpeaking, setIsSpeaking] = useState(false);
     const [cloudStt, setCloudStt] = useState(false);
 
-    const audioQueueRef = useRef(null);
     const abortControllerRef = useRef(null);
-
-    if (!audioQueueRef.current) {
-        audioQueueRef.current = new AudioQueue();
-    }
+    const audioQueue = getSharedAudioQueue();
 
     // Connect queue callbacks to speaking state and listen for global audio stop
     useEffect(() => {
-        const queue = audioQueueRef.current;
-        queue.onPlay = () => setIsSpeaking(true);
-        queue.onIdle = () => setIsSpeaking(false);
+        if (!audioQueue) return;
+        audioQueue.setCallbacks(
+            () => setIsSpeaking(true),
+            () => setIsSpeaking(false)
+        );
 
         const onExternalStop = () => {
             if (abortControllerRef.current) {
                 abortControllerRef.current.abort();
             }
-            queue.stop();
+            audioQueue.stop();
             setIsSpeaking(false);
         };
         window.addEventListener('spidey:audio_stop', onExternalStop);
         return () => window.removeEventListener('spidey:audio_stop', onExternalStop);
-    }, []);
+    }, [audioQueue]);
 
     // Load initial settings from server
     useEffect(() => {
@@ -87,30 +85,27 @@ export function useVoice() {
             abortControllerRef.current.abort();
             abortControllerRef.current = null;
         }
-        if (audioQueueRef.current) {
-            audioQueueRef.current.stop();
+        if (audioQueue) {
+            audioQueue.stop();
         }
         setIsSpeaking(false);
         stopVoiceTurn().catch(() => {});
-    }, []);
+    }, [audioQueue]);
 
     const speak = useCallback(
         async (text) => {
-            if (!speakEnabled || !text || !text.trim()) return;
+            if (!speakEnabled || !text || !text.trim() || !audioQueue) return;
 
-            // Silence other audio players before initiating speech
             window.dispatchEvent(new CustomEvent('spidey:audio_stop'));
 
-            // Stop any existing playback first
             if (abortControllerRef.current) {
                 abortControllerRef.current.abort();
             }
             abortControllerRef.current = new AbortController();
             const signal = abortControllerRef.current.signal;
 
-            const queue = audioQueueRef.current;
-            queue.stop();
-            const currentEpoch = queue.epoch;
+            audioQueue.stop();
+            const currentEpoch = audioQueue.epoch;
 
             const sentences = splitSentencesClient(text);
             if (!sentences.length) return;
@@ -119,10 +114,10 @@ export function useVoice() {
 
             try {
                 for (const sentence of sentences) {
-                    if (signal.aborted || currentEpoch !== queue.epoch) break;
+                    if (signal.aborted || currentEpoch !== audioQueue.epoch) break;
                     const wavBuffer = await fetchTTSAudio(sentence, signal);
-                    if (signal.aborted || currentEpoch !== queue.epoch) break;
-                    await queue.push(wavBuffer, currentEpoch);
+                    if (signal.aborted || currentEpoch !== audioQueue.epoch) break;
+                    await audioQueue.push(wavBuffer, currentEpoch);
                 }
             } catch (err) {
                 if (err.name !== 'AbortError') {
@@ -130,7 +125,7 @@ export function useVoice() {
                 }
             }
         },
-        [speakEnabled]
+        [speakEnabled, audioQueue]
     );
 
     return {
@@ -143,7 +138,6 @@ export function useVoice() {
         toggleSpeak,
         speak,
         stop,
-        audioQueue: audioQueueRef.current
+        audioQueue
     };
 }
-

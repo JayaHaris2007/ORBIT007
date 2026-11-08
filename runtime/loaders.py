@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 import warnings
 from typing import Any
@@ -24,7 +25,6 @@ def get_gpu_memory_gib() -> tuple[float, float]:
         return 0.0, 0.0
     try:
         allocated = torch.cuda.memory_allocated(0) / (1024**3)
-        reserved = torch.cuda.memory_reserved(0) / (1024**3)
         total = torch.cuda.get_device_properties(0).total_memory / (1024**3)
         free = total - allocated
         return round(allocated, 2), round(free, 2)
@@ -32,31 +32,28 @@ def get_gpu_memory_gib() -> tuple[float, float]:
         return 0.0, 0.0
 
 
-def load_omnivoice_eager(generation_lock: Any | None = None) -> tuple[Any, float]:
-    """Load OmniVoice once, warm up with one short synthesis, and register."""
-    from voice.tts import OmniVoiceEngine
+def load_phonon_eager() -> tuple[Any, float]:
+    """Load the CPU-only Phonon engine and retain SAPI as a Windows fallback."""
+    from voice import config
+    from voice.phonon_engine import PhononEngine
+    from voice.tts import TTSService, WindowsSapiEngine
 
-    t0 = time.perf_counter()
-    engine = OmniVoiceEngine(shared_lock=generation_lock)
-    engine._load_eager()
-
-    if not engine.available:
-        raise RuntimeError(f"OmniVoice failed to initialize: {engine.error}")
-
-    # Warm up with one short phrase (discard audio)
-    log.info("Warming up OmniVoice TTS engine...")
-    _ = engine.synthesize("Hi.")
-
-    load_time = time.perf_counter() - t0
-    alloc_gib, _ = get_gpu_memory_gib()
-    log.info(
-        "OmniVoice TTS ready in %.2fs (device=%s, dtype=%s, VRAM allocated=%.2f GiB).",
-        load_time,
-        engine.device,
-        engine.dtype,
-        alloc_gib,
-    )
-    return engine, load_time
+    started = time.perf_counter()
+    sapi = WindowsSapiEngine()
+    phonon = None
+    if config.TTS_BACKEND != "sapi":
+        try:
+            phonon = PhononEngine(
+                model=config.PHONON_MODEL,
+                lang=config.PHONON_LANG,
+                quant=config.PHONON_QUANT,
+                voice=config.PHONON_VOICE,
+            ).load()
+        except Exception as err:
+            log.exception("Phonon TTS failed to initialize; using SAPI fallback: %s", err)
+    service = TTSService(phonon=phonon, sapi=sapi)
+    load_time = time.perf_counter() - started
+    return service, load_time
 
 
 def load_embedder_eager(
@@ -171,21 +168,59 @@ def load_all_models_eager(
         except Exception:
             pass
 
-    # 2. OmniVoice TTS
+    # 2. Phonon TTS (CPU) with Windows SAPI fallback
     try:
-        tts_engine, load_time = load_omnivoice_eager(generation_lock=generation_lock)
-        REGISTRY.register("tts", tts_engine, metrics={"load_time": load_time})
+        tts_engine, load_time = load_phonon_eager()
+        if os.environ.get("TTS_BACKEND", "phonon").strip().lower() != "sapi" and tts_engine.phonon is None:
+            REGISTRY.fail("tts", tts_engine.error or "Phonon failed to initialize.")
+            log.warning("Windows SAPI fallback remains available after Phonon failure.")
+        else:
+            REGISTRY.register(
+                "tts",
+                tts_engine,
+                metrics={
+                    "backend": tts_engine.backend,
+                    "voice": tts_engine.voice,
+                    "sample_rate": 24000,
+                    "load_time": load_time,
+                    "device": tts_engine.device,
+                },
+            )
+            if tts_engine.phonon is not None and hasattr(tts_engine.phonon, "warm_up"):
+                threading.Thread(
+                    target=tts_engine.phonon.warm_up,
+                    daemon=True,
+                    name="phonon-warmup",
+                ).start()
     except Exception as err:
-        log.exception("Eager load failed for OmniVoice TTS: %s", err)
+        log.exception("Eager load failed for Phonon TTS: %s", err)
         REGISTRY.fail("tts", err)
 
     # 3. SentenceTransformer Embedder
-    try:
-        embedder, load_time = load_embedder_eager()
-        REGISTRY.register("embedder", embedder, metrics={"load_time": load_time})
-    except Exception as err:
-        log.exception("Eager load failed for SentenceTransformer: %s", err)
-        REGISTRY.fail("embedder", err)
+    #
+    # This stack also loads native torch/torchaudio components. On Windows,
+    # an incompatible binary can terminate the process before Python can
+    # handle an exception, so keep it opt-in.
+    eager_embedder = os.environ.get("SPIDEY_EAGER_EMBEDDER", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not eager_embedder:
+        message = (
+            "SentenceTransformer eager loading is disabled. Set "
+            "SPIDEY_EAGER_EMBEDDER=1 after verifying the installed torch build."
+        )
+        log.warning(message)
+        REGISTRY.fail("embedder", message)
+    else:
+        try:
+            embedder, load_time = load_embedder_eager()
+            REGISTRY.register("embedder", embedder, metrics={"load_time": load_time})
+        except Exception as err:
+            log.exception("Eager load failed for SentenceTransformer: %s", err)
+            REGISTRY.fail("embedder", err)
 
     # 4. STT Engine
     try:

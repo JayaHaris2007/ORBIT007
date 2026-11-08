@@ -230,7 +230,7 @@ def test_habit_completion_phrasings(chat_id, temp_db, phrase_template):
 
 
 def test_habit_rename_and_delete_intents(chat_id, temp_db):
-    habit = temp_db.create_habit("Jogging")
+    temp_db.create_habit("Jogging")
     renamed = app._handle_local_command("rename habit Jogging to Running 5K", chat_id)
     assert renamed is not None
     assert renamed[1] == "local-habit-manager"
@@ -374,7 +374,7 @@ def test_bare_task_keywords(chat_id, temp_db, prompt):
 
 
 def test_conversational_habit_completion_from_discord_log(chat_id, temp_db):
-    habit = temp_db.create_habit("Sleeping")
+    temp_db.create_habit("Sleeping")
     result = app._handle_local_command("Now I am completed sleeping", chat_id)
     assert result is not None
     reply, provider = result
@@ -448,7 +448,7 @@ def test_daily_briefing_and_xp_status(chat_id, temp_db):
 
 
 def test_contextual_priority_undo_and_delete(chat_id, temp_db):
-    task = temp_db.create_task("Ship release", priority="medium")
+    temp_db.create_task("Ship release", priority="medium")
     list_res = app._handle_local_command("tasks", chat_id)
     temp_db.add_message(chat_id, "user", "tasks")
     temp_db.add_message(chat_id, "assistant", list_res[0])

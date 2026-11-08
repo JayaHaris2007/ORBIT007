@@ -20,7 +20,6 @@ import argparse
 import json
 import logging
 import os
-import re
 import sys
 import tempfile
 import time
@@ -232,11 +231,11 @@ def run_evaluation(
         cases = [c for c in cases if c.get("id") == filter_case_id]
 
     total_cases = len(cases)
-    print(f"\n=======================================================")
+    print("\n=======================================================")
     print(f"Running ORBIT007 Agent Evaluation on {total_cases} test cases")
     print(f"Model: {os.environ.get('OLLAMA_MODEL', 'qwen3.5:4b')}")
     print(f"Ollama URL: {os.environ.get('OLLAMA_URL', 'http://127.0.0.1:11434')}")
-    print(f"=======================================================\n")
+    print("=======================================================\n")
 
     results: list[dict[str, Any]] = []
     latencies: list[float] = []
@@ -451,7 +450,7 @@ def generate_markdown_report(eval_data: dict[str, Any], output_path: Path) -> No
         "",
         f"**Date:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}  ",
         f"**Model:** `{os.environ.get('OLLAMA_MODEL', 'qwen3.5:4b')}`  ",
-        f"**Backend:** Ollama native tool calling (`/api/chat`)  ",
+        "**Backend:** Ollama native tool calling (`/api/chat`)  ",
         f"**Total Cases:** {s['total_cases']}  ",
         "",
         "## 1. Executive Summary & Quality Gates",
@@ -513,8 +512,8 @@ def generate_markdown_report(eval_data: dict[str, Any], output_path: Path) -> No
         "",
         "## 5. Conclusion & Deployment Readiness",
         "",
-        f"- The evaluation confirms that `qwen3.5:4b` running via native Ollama tool calling meets the operational requirements for S.P.I.D.E.Y.",
-        f"- `ORBIT_TOOLS=1` is recommended as the active default.",
+        "- The evaluation confirms that `qwen3.5:4b` running via native Ollama tool calling meets the operational requirements for S.P.I.D.E.Y.",
+        "- `ORBIT_TOOLS=1` is recommended as the active default.",
     ])
 
     with open(output_path, "w", encoding="utf-8") as f:

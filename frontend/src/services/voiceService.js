@@ -42,77 +42,90 @@ export class AudioQueue {
         src.start();
     }
 
+    setCallbacks(onPlay, onIdle) {
+        this.onPlay = onPlay;
+        this.onIdle = onIdle;
+    }
+
     stop() {
         this.epoch++;
         this.queue = [];
         try {
             this.playing?.stop();
-        } catch {}
+        } catch { /* ignore */ }
         this.playing = null;
         this.onIdle?.();
     }
 }
 
-export const fetchVoiceSettings = async () => {
-    return await apiRequest('/api/voice/settings');
-};
+let _sharedAudioQueue = null;
+export function getSharedAudioQueue() {
+    if (typeof window === 'undefined') return null;
+    if (!_sharedAudioQueue) {
+        _sharedAudioQueue = new AudioQueue();
+    }
+    return _sharedAudioQueue;
+}
 
-export const updateVoiceSettings = async (settings) => {
-    return await apiRequest('/api/voice/settings', {
+export async function fetchVoiceSettings() {
+    return apiRequest('/api/voice/settings');
+}
+
+export async function updateVoiceSettings(payload) {
+    return apiRequest('/api/voice/settings', {
         method: 'PUT',
-        body: JSON.stringify(settings)
+        body: JSON.stringify(payload),
     });
-};
+}
 
-export const stopVoiceTurn = async (sessionId = 'default') => {
-    return await apiRequest('/api/voice/stop', {
-        method: 'POST',
-        body: JSON.stringify({ session_id: sessionId })
-    });
-};
+export async function fetchTTSAudio(text, signal = null) {
+    const token = (import.meta.env.VITE_ORBIT_TOKEN || '').trim();
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['x-orbit-token'] = token;
 
-export const fetchTTSAudio = async (text, signal) => {
     const res = await fetch(`${API_BASE_URL}/api/voice/tts`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ text }),
-        signal
+        signal,
     });
     if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || `TTS request failed (${res.status})`);
+        const errorText = await res.text().catch(() => 'Unknown error');
+        throw new Error(`TTS failed (${res.status}): ${errorText}`);
     }
-    return await res.arrayBuffer();
-};
+    return res.arrayBuffer();
+}
 
-export const splitSentencesClient = (text, minChars = 25, maxChars = 220) => {
+export async function stopVoiceTurn(sessionId = 'default') {
+    return apiRequest('/api/voice/stop', {
+        method: 'POST',
+        body: JSON.stringify({ session_id: sessionId }),
+    });
+}
+
+export function splitSentencesClient(text, maxChars = 200) {
     if (!text || !text.trim()) return [];
-    // Split on terminal punctuation followed by space, or newlines
-    const rawParts = text.split(/(?<=[.!?…])\s+|\n+/).map((p) => p.trim()).filter(Boolean);
-    const out = [];
-    let buf = '';
-    for (const p of rawParts) {
-        buf = `${buf} ${p}`.trim();
-        if (buf.length >= minChars) {
-            out.push(buf);
-            buf = '';
+    const normalized = text.replace(/\s+/g, ' ').trim();
+    const rawChunks = normalized.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [normalized];
+    const results = [];
+    for (const chunk of rawChunks) {
+        const trimmed = chunk.trim();
+        if (!trimmed) continue;
+        if (trimmed.length <= maxChars) {
+            results.push(trimmed);
+        } else {
+            const words = trimmed.split(' ');
+            let current = '';
+            for (const word of words) {
+                if ((current + ' ' + word).trim().length <= maxChars) {
+                    current = (current + ' ' + word).trim();
+                } else {
+                    if (current) results.push(current);
+                    current = word;
+                }
+            }
+            if (current) results.push(current);
         }
     }
-    if (buf) {
-        if (out.length > 0) out[out.length - 1] += ' ' + buf;
-        else out.push(buf);
-    }
-    const final = [];
-    for (let s of out) {
-        while (s.length > maxChars) {
-            let cut = s.lastIndexOf(',', maxChars);
-            if (cut < 40) cut = s.lastIndexOf(' ', maxChars);
-            if (cut <= 0) cut = maxChars;
-            final.push(s.slice(0, cut + 1).trim());
-            s = s.slice(cut + 1).trim();
-        }
-        if (s) final.push(s);
-    }
-    return final.filter(Boolean);
-};
-
+    return results;
+}

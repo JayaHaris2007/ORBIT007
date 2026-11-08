@@ -4,14 +4,11 @@ import io
 import json
 import urllib.error
 import urllib.request
-from unittest.mock import MagicMock
 from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 
 import app
-import discord_bot
 
 _ORIGINAL_ENSURE_MODEL_LOADED = app.ensure_model_loaded
 

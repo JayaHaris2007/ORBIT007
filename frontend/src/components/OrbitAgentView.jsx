@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useOrbitAgent } from '../useOrbitAgent';
+import { useOrbitAgent } from '../hooks/useOrbitAgent';
 import { Mic, MicOff, Send, Volume2, CheckCircle2, Circle, Trash2, Plus, Wifi, WifiOff, Loader2 } from 'lucide-react';
 
 export default function OrbitAgentView({ activeChatId }) {
@@ -13,7 +13,6 @@ export default function OrbitAgentView({ activeChatId }) {
     startVoiceCapture,
     stopVoiceCapture,
     addReminder,
-    completeReminder,
     toggleReminder,
     deleteReminder,
   } = useOrbitAgent(activeChatId);

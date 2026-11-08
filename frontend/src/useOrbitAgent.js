@@ -27,7 +27,9 @@ export function useOrbitAgent(activeChatIdProp) {
       if (stored && typeof stored === 'string' && stored.trim()) {
         return stored.trim();
       }
-    } catch {}
+    } catch {
+      // ignore
+    }
     return 'default';
   }, [activeChatIdProp]);
 
@@ -48,7 +50,9 @@ export function useOrbitAgent(activeChatIdProp) {
         try {
           localStorage.removeItem('spidey_active_chat_id');
           localStorage.removeItem('jarvis_active_chat_id');
-        } catch {}
+        } catch {
+      // ignore
+    }
         setActiveChatId('default');
         activeChatIdRef.current = 'default';
         return;
@@ -323,7 +327,9 @@ export function useOrbitAgent(activeChatIdProp) {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       try {
         wsRef.current.send(JSON.stringify({ type: 'end_audio' }));
-      } catch {}
+      } catch {
+      // ignore
+    }
     }
     setIsRecording(false);
   }, []);

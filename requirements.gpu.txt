@@ -1,11 +1,25 @@
-# PyTorch, Transformers, and Accelerate (needed by OmniVoice TTS and memory search)
+# S.P.I.D.E.Y. Python dependencies
+#
+# Use a fresh virtual environment for the selected Python interpreter:
+#   py -3.14 -m venv .venv
+#   .\.venv\Scripts\python.exe -m pip install --upgrade pip
+#   .\.venv\Scripts\python.exe -m pip install -r requirements.gpu.txt
+#
+# Python 3.14 is the latest supported Windows interpreter for this stack.
+# Do not reuse a virtual environment created with another Python minor version;
+# compiled packages such as regex, pydantic-core, numpy, and torch are
+# interpreter-specific.
+
+# PyTorch, Transformers, and Accelerate (needed by STT and memory search)
 torch
 transformers
-accelerate # Required by omnivoice
+accelerate
 sentence-transformers # Semantic memory search
+scipy
+scikit-learn
 
-# Voice stack (OmniVoice TTS and SpeechRecognition STT)
-omnivoice
+# Voice stack (Phonon TTS and SpeechRecognition STT)
+ptts
 SpeechRecognition
 soundfile
 numpy
@@ -13,10 +27,14 @@ numpy
 # Web server and framework
 fastapi
 uvicorn[standard]
+pydantic
 python-dotenv
 apscheduler
 rapidfuzz
 dateparser
+# dateparser imports this native extension; install it explicitly so a fresh
+# environment gets a wheel compatible with its selected Python interpreter.
+regex
 tavily-python
 
 # Discord voice & bot integrations

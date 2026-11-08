@@ -11,7 +11,6 @@ import pytest
 from agent.confirm import ConfirmationManager
 from agent.deps import AgentDeps
 from agent.tools import (
-    TOOL_REGISTRY,
     TOOLS,
     ToolContext,
     resolve_entity,

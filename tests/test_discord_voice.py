@@ -204,7 +204,7 @@ def test_calculate_discord_pcm_energy():
 
 
 def test_discord_voice_audio_sink_vad_and_barge_in():
-    from voice.discord_voice import DiscordVoiceCall, DiscordVoiceAudioSink, _VOICE_RECV_AVAILABLE
+    from voice.discord_voice import DiscordVoiceCall, _VOICE_RECV_AVAILABLE
     if not _VOICE_RECV_AVAILABLE:
         pytest.skip("voice_recv not available")
 
@@ -283,7 +283,6 @@ def test_respond_to_voice_utterance():
 
 
 def test_reminder_delivery_target_storage_in_memory_store(tmp_path):
-    from pathlib import Path
     from memory import MemoryStore
     db_file = tmp_path / "test_reminders.db"
     store = MemoryStore(db_file)

@@ -212,7 +212,7 @@ class SpideyBot(commands.Bot):
                             except Exception as e:
                                 LOGGER.warning("Could not fetch reminder target for %s: %s", reminder_id, e)
 
-                        delivered = False
+                        delivered = False  # noqa: must be before all branches
                         if target and target.get("channel_id") and target.get("guild_id"):
                             guild_id = target["guild_id"]
                             channel_id = target["channel_id"]
@@ -369,38 +369,38 @@ class SpideyBot(commands.Bot):
                                         channel_id,
                                     )
     
-                    if not delivered:
-                        try:
-                            await self.send_dm(int(external_user_id), content)
-                            self.last_notification_id[chat_id] = notification["id"]
-                            app.memory_store.set_external_last_notification_id(chat_id, notification["id"])
-                            LOGGER.info(
-                                "Delivered notification %s to user %s via DM.",
-                                notification["id"],
-                                external_user_id,
-                            )
+                        if not delivered:
                             try:
-                                await asyncio.to_thread(
-                                    app.memory_store.add_message,
-                                    chat_id,
-                                    "assistant",
-                                    content,
+                                await self.send_dm(int(external_user_id), content)
+                                self.last_notification_id[chat_id] = notification["id"]
+                                app.memory_store.set_external_last_notification_id(chat_id, notification["id"])
+                                LOGGER.info(
+                                    "Delivered notification %s to user %s via DM.",
+                                    notification["id"],
+                                    external_user_id,
                                 )
-                            except Exception as e:
-                                LOGGER.warning("Could not record assistant reminder message for chat %s: %s", chat_id, e)
-                        except discord.Forbidden:
-                            self.last_notification_id[chat_id] = notification["id"]
-                            app.memory_store.set_external_last_notification_id(chat_id, notification["id"])
-                            LOGGER.warning(
-                                "Cannot DM notification %s to user %s; DMs are closed.",
-                                notification["id"],
-                                external_user_id,
-                            )
-                        except Exception:
-                            LOGGER.exception(
-                                "Could not deliver notification %s.",
-                                notification["id"],
-                            )
+                                try:
+                                    await asyncio.to_thread(
+                                        app.memory_store.add_message,
+                                        chat_id,
+                                        "assistant",
+                                        content,
+                                    )
+                                except Exception as e:
+                                    LOGGER.warning("Could not record assistant reminder message for chat %s: %s", chat_id, e)
+                            except discord.Forbidden:
+                                self.last_notification_id[chat_id] = notification["id"]
+                                app.memory_store.set_external_last_notification_id(chat_id, notification["id"])
+                                LOGGER.warning(
+                                    "Cannot DM notification %s to user %s; DMs are closed.",
+                                    notification["id"],
+                                    external_user_id,
+                                )
+                            except Exception:
+                                LOGGER.exception(
+                                    "Could not deliver notification %s.",
+                                    notification["id"],
+                                )
             except asyncio.CancelledError:
                 break
             except Exception:

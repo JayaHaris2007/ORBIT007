@@ -23,7 +23,7 @@ import re
 import sqlite3
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
-from typing import Any, Callable
+from typing import Callable
 
 import numpy
 

@@ -33,15 +33,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import io
 import json
 import os
 import sys
 import time
 import urllib.error
 import urllib.request
-import uuid
-import wave
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any
@@ -678,7 +675,7 @@ class OllamaVerifier:
             "",
             f"- **Direct Ollama Generation Speed:** {f'{self.tokens_per_sec:.1f} tokens/s' if self.tokens_per_sec else 'N/A'}",
             f"- **Ollama VRAM Allocation (`size_vram`):** {f'{self.size_vram_mb:.1f} MB' if self.size_vram_mb else 'N/A'}",
-            f"- **GPU Offload:** 100% layers offloaded to GPU",
+            "- **GPU Offload:** 100% layers offloaded to GPU",
             "",
             "## Manual Owner Steps Still Required",
             "",
@@ -698,7 +695,7 @@ class OllamaVerifier:
             "- [ ] Bot connects and appears online in your Discord server.",
             "- [ ] Bot answers regular chat mentions.",
             "- [ ] Bot parses task and reminder commands from Discord messages.",
-            "- [ ] Voice call receives a spoken audio reply via OmniVoice.",
+            "- [ ] Voice call receives a spoken audio reply via Phonon or Windows SAPI.",
             "",
             "## Untracked Local Weights To Delete",
             "",
@@ -740,4 +737,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

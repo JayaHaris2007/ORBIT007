@@ -20,7 +20,6 @@ from typing import Any
 from agent.confirm import ConfirmationManager
 from agent.deps import AgentDeps
 from agent.tools import (
-    TOOL_REGISTRY,
     TOOLS,
     ToolContext,
     validate_and_execute_tool,
@@ -140,7 +139,6 @@ def run_agent_loop(
         has_called_web_search=False,
     )
 
-    mode = os.environ.get("ORBIT_TOOL_MODE", "native").strip().lower()
 
     # Build system prompt
     now_str = datetime.now(deps.local_timezone).strftime("%A, %d %B %Y, %I:%M %p %Z")

@@ -12,7 +12,6 @@ import sys
 import types
 import typing
 from datetime import datetime, timezone
-from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 if not hasattr(typing, "NotRequired"):

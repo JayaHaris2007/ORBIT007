@@ -1,12 +1,14 @@
 """Unit tests for the voice/ subsystem without GPU or live model dependencies."""
 
 import asyncio
+import threading
 from unittest.mock import MagicMock, patch
-import pytest
+import numpy as np
 from fastapi.testclient import TestClient
 
 import app
 from voice import config, sentences, session, stt, text_clean, tts
+from voice.phonon_engine import PhononEngine
 
 
 # --- 1. Text Cleaner Tests ---
@@ -114,42 +116,42 @@ def test_voice_session_reset_wipes_transient_buffers():
 
 # --- 4. TTS Graceful Degradation & Engine Fallback Tests ---
 
-def test_tts_degrades_when_unavailable():
-    engine = tts.OmniVoiceEngine(model_id="fake/model", device="cpu", dtype="float32")
-    engine.available = False
-    assert engine.synthesize("Hello") is None
+def test_phonon_invalid_voice_uses_first_catalog(monkeypatch):
+    class FakeTTS:
+        voices = ["Easton", "Other"]
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setitem(__import__("sys").modules, "ptts", MagicMock(TTS=FakeTTS))
+    engine = PhononEngine("fake/model", "en", "q8", "Missing").load()
+    assert engine.voice == "Easton"
 
 
-def test_tts_cpu_fallback_on_first_load_failure():
-    calls = []
-
-    class FakeOmniVoice:
-        @classmethod
-        def from_pretrained(cls, model_id, device_map, dtype):
-            calls.append((device_map, str(dtype)))
-            if device_map.startswith("cuda"):
-                raise RuntimeError("CUDA out of memory error")
-            return MagicMock()
-
-    engine = tts.OmniVoiceEngine(model_id="fake/model", device="cuda:0", dtype="float16")
-
-    with patch.dict("sys.modules", {"omnivoice": MagicMock(OmniVoice=FakeOmniVoice)}):
-        engine.load()
-
-    assert engine.available is True
-    assert engine.device == "cpu"
-    assert engine.dtype == "float32"
-    assert len(calls) == 2
-    assert calls[0][0] == "cuda:0"
-    assert calls[1][0] == "cpu"
+def test_tts_falls_back_to_sapi_when_phonon_raises():
+    phonon = MagicMock(ready=True)
+    phonon.synth_pcm.side_effect = RuntimeError("phonon failure")
+    sapi = MagicMock(available=True, device="windows-sapi", dtype="pcm", voice="")
+    sapi.synthesize.return_value = np.ones(4, dtype=np.float32)
+    service = tts.TTSService(phonon=phonon, sapi=sapi)
+    assert service.synthesize("Hello") is not None
+    sapi.synthesize.assert_called_once()
 
 
-def test_tts_uses_voice_design_instruct_only():
-    engine = tts.OmniVoiceEngine(model_id="fake/model", device="cpu", dtype="float32")
-    assert "instruct" in engine.voice_kwargs
-    assert "ref_audio" not in engine.voice_kwargs
-    assert "ref_text" not in engine.voice_kwargs
-    assert engine.voice_kwargs["instruct"] == config.TTS_INSTRUCT
+def test_tts_output_is_wav():
+    audio = np.zeros(240, dtype=np.float32)
+    wav = tts.audio_to_wav_bytes(audio)
+    assert wav[:4] == b"RIFF"
+    assert wav[8:12] == b"WAVE"
+
+
+def test_phonon_cancellation_stops_synthesis():
+    engine = PhononEngine("fake/model", "en", "q8", "Easton")
+    engine._tts = MagicMock()
+    cancel = threading.Event()
+    cancel.set()
+    assert engine.synth_pcm("Do not synthesize", cancel=cancel) is None
+    engine._tts.synth.assert_not_called()
 
 
 # --- 5. Voice Router & Settings Round-Trip Tests ---
@@ -180,14 +182,13 @@ def test_voice_settings_round_trip(temp_db):
 def test_voice_tts_endpoint_unavailable_engine():
     client = TestClient(app.app)
     # Ensure engine is marked unavailable
-    fake_engine = tts.OmniVoiceEngine()
-    fake_engine.available = False
+    fake_engine = tts.TTSService(sapi=MagicMock(available=False))
     fake_engine.load = MagicMock()
     tts.set_tts_engine(fake_engine)
 
     res = client.post("/api/voice/tts", json={"text": "Hello world"})
     assert res.status_code == 503
-    assert "OmniVoice TTS engine is not available" in res.json()["error"]
+    assert "TTS engine is not available" in res.json()["error"]
 
 
 def test_stt_whisper_fallback_and_silence():

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent.confirm import ConfirmationManager, PendingAction
+from agent.confirm import ConfirmationManager
 from agent.deps import AgentDeps
 
 

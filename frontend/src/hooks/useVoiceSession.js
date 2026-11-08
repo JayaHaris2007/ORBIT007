@@ -41,7 +41,7 @@ export function useVoiceSession({ onTranscript = null, onReply = null, audioQueu
             try {
                 workletNodeRef.current.disconnect();
                 workletNodeRef.current.port.close();
-            } catch {}
+            } catch { /* ignore */ }
             workletNodeRef.current = null;
         }
         if (micStreamRef.current) {
@@ -51,7 +51,7 @@ export function useVoiceSession({ onTranscript = null, onReply = null, audioQueu
         if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
             try {
                 audioContextRef.current.close();
-            } catch {}
+            } catch { /* ignore */ }
             audioContextRef.current = null;
         }
     }, []);
@@ -62,7 +62,7 @@ export function useVoiceSession({ onTranscript = null, onReply = null, audioQueu
             try {
                 wsRef.current.send(JSON.stringify({ type: 'stop' }));
                 wsRef.current.close();
-            } catch {}
+            } catch { /* ignore */ }
         }
         wsRef.current = null;
         queueRef.current.stop();
@@ -159,7 +159,6 @@ export function useVoiceSession({ onTranscript = null, onReply = null, audioQueu
                         }
                     } else if (event.data instanceof ArrayBuffer) {
                         // Binary WAV frame received
-                        const audioMeta = nextExpectedAudioSeqRef.current;
                         nextExpectedAudioSeqRef.current = null;
                         if (!timingRef.current.firstAudio && timingRef.current.speechEnd) {
                             const now = performance.now();
