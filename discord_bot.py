@@ -552,6 +552,12 @@ class SpideyBot(commands.Bot):
             app.memory_store.add_message(chat_id, "assistant", conf_reply)
             for chunk in _split_response(conf_reply):
                 await message.reply(chunk)
+            if message.guild is not None:
+                voice_mgr = get_discord_voice_manager()
+                if voice_mgr.is_call_active(message.guild.id):
+                    asyncio.create_task(
+                        voice_mgr.speak_text(message.guild.id, message.author.id, conf_reply)
+                    )
             return
 
         try:

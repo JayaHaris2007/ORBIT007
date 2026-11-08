@@ -1,0 +1,10 @@
+{
+  "name": "S.P.I.D.E.Y — Personal AI Co-Pilot & Productivity Hub",
+  "description": "Local-first AI assistant and productivity workspace featuring task management, habit tracking, smart reminders, learning roadmaps, and Discord voice integration.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

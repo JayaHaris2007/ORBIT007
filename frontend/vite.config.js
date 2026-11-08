@@ -10,8 +10,9 @@ const BACKEND_WS = `ws://127.0.0.1:${BACKEND_PORT}`
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
-    host: true,
-    port: 5173,
+    host: '0.0.0.0',
+    port: 3000,
+    allowedHosts: true,
     proxy: {
       '/api': {
         target: BACKEND_HTTP,

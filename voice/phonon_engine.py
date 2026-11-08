@@ -103,8 +103,16 @@ class PhononEngine:
         with self._lock:
             if cancel and cancel.is_set():
                 return
-            with self._tts.stream(text, voice=self.voice) as audio:
-                for chunk in audio:
+            stream_obj = self._tts.stream(text, voice=self.voice)
+            if hasattr(stream_obj, "__enter__"):
+                with stream_obj as audio:
+                    for chunk in audio:
+                        if cancel and cancel.is_set():
+                            break
+                        yield np.asarray(chunk, dtype=np.float32)
+            else:
+                for chunk in stream_obj:
                     if cancel and cancel.is_set():
                         break
                     yield np.asarray(chunk, dtype=np.float32)
+

@@ -75,10 +75,16 @@ class WindowsSapiEngine:
             )
             if result.returncode != 0:
                 raise RuntimeError(result.stderr.strip() or "Windows SAPI synthesis failed.")
-            audio, _ = sf.read(output_path, dtype="float32")
+            audio, file_sr = sf.read(output_path, dtype="float32")
             if audio.ndim > 1:
                 audio = np.mean(audio, axis=1)
-            return np.asarray(audio, dtype=np.float32)
+            audio = np.asarray(audio, dtype=np.float32)
+            if file_sr and file_sr != SR and len(audio) > 1:
+                new_len = max(1, int(round(len(audio) * SR / float(file_sr))))
+                x_old = np.linspace(0.0, 1.0, len(audio), endpoint=False)
+                x_new = np.linspace(0.0, 1.0, new_len, endpoint=False)
+                audio = np.interp(x_new, x_old, audio).astype(np.float32)
+            return audio
         except (OSError, RuntimeError, subprocess.SubprocessError, ValueError) as err:
             self.error = str(err)
             log.error("Windows SAPI synthesis failed: %s", err)
